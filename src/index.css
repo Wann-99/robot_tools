@@ -2,6 +2,27 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color: #0f172a;
+  background: #eef2f7;
+  font-family: Inter, "Microsoft YaHei", "PingFang SC", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}
+
+html,
+body,
+#root {
+  min-height: 100%;
+}
+
+body {
+  margin: 0;
+  background: linear-gradient(180deg, #f8fbff 0%, #f2f6fb 42%, #eef2f7 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
 /* 覆盖 react-datepicker 的默认样式以匹配 Tailwind 主题 */
 .react-datepicker-wrapper {
   display: block;
