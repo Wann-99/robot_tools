@@ -2,10 +2,9 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import obfuscator from "vite-plugin-javascript-obfuscator";
 
-// Obfuscation is OPT-IN via env var so a baseline build can be verified
-// without it. To enable:    OBFUSCATE=1 npm run build
-// (PowerShell:   $env:OBFUSCATE=1; npm run build)
-const ENABLE_OBFUSCATION = process.env.OBFUSCATE === "1";
+// Obfuscation runs on every production build by default.
+// To skip it locally:  $env:NO_OBFUSCATE=1; npm run build
+const ENABLE_OBFUSCATION = process.env.NO_OBFUSCATE !== "1";
 
 // Settings tuned to leave Rollup's dynamic-import paths and asset URLs intact.
 // Anything string-related that could break module resolution is OFF.

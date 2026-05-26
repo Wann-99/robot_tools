@@ -421,7 +421,6 @@ function LoginPage({ accounts, setAccounts, onLogin }) {
               onChange={e => setForm(f => ({ ...f, username: e.target.value }))}
               onKeyDown={e => e.key === "Enter" && submit()}
               className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:bg-white"
-              placeholder="admin"
             />
           </div>
           <div>
@@ -432,7 +431,6 @@ function LoginPage({ accounts, setAccounts, onLogin }) {
               onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
               onKeyDown={e => e.key === "Enter" && submit()}
               className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:bg-white"
-              placeholder="••••••"
             />
           </div>
           {isRegister && (
@@ -444,7 +442,6 @@ function LoginPage({ accounts, setAccounts, onLogin }) {
                 onChange={e => setForm(f => ({ ...f, confirm: e.target.value }))}
                 onKeyDown={e => e.key === "Enter" && submit()}
                 className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:bg-white"
-                placeholder="再输入一次"
               />
             </div>
           )}
@@ -461,7 +458,7 @@ function LoginPage({ accounts, setAccounts, onLogin }) {
           {isRegister ? "注册并登录" : "登录"}
         </button>
 
-        <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
+        <div className="mt-4 flex items-center justify-center text-xs text-slate-500">
           <button
             type="button"
             onClick={() => { setIsRegister(v => !v); setError(""); setForm({ username: "", password: "", confirm: "" }); }}
@@ -469,11 +466,6 @@ function LoginPage({ accounts, setAccounts, onLogin }) {
           >
             {isRegister ? "已有账号？登录" : "没有账号？注册"}
           </button>
-          <span className="text-slate-400">默认 admin/admin123 · user/user123</span>
-        </div>
-
-        <div className="mt-5 rounded-lg border border-amber-100 bg-amber-50/60 px-3 py-2 text-[11px] leading-5 text-amber-700">
-          ⚠ 此登录仅作身份标识，不是真实安全鉴权 —— 账号密码存储在你本地浏览器，所有人可注册。如需真实访问控制，请在前端外层加 Cloudflare Access 等边缘鉴权。
         </div>
       </div>
     </div>
