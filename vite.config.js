@@ -2,48 +2,49 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import obfuscator from "vite-plugin-javascript-obfuscator";
 
-// Production-only JavaScript obfuscation.
-// Heavy settings tuned to stay correct + tolerable runtime cost.
+// Obfuscation is OPT-IN via env var so a baseline build can be verified
+// without it. To enable:    OBFUSCATE=1 npm run build
+// (PowerShell:   $env:OBFUSCATE=1; npm run build)
+const ENABLE_OBFUSCATION = process.env.OBFUSCATE === "1";
+
+// Settings tuned to leave Rollup's dynamic-import paths and asset URLs intact.
+// Anything string-related that could break module resolution is OFF.
 const obfuscatorOptions = {
   compact: true,
   simplify: true,
-  // Control-flow flattening — the big one. Set <1 so not every block is wrapped.
   controlFlowFlattening: true,
-  controlFlowFlatteningThreshold: 0.75,
-  // Dead code injection bloats the bundle. Keep it moderate.
+  controlFlowFlatteningThreshold: 0.6,
   deadCodeInjection: true,
-  deadCodeInjectionThreshold: 0.35,
-  // Identifier mangling — short scrambled names.
+  deadCodeInjectionThreshold: 0.3,
   identifierNamesGenerator: "mangled-shuffled",
   numbersToExpressions: true,
-  // Self-defending wraps code so it breaks if reformatted/beautified.
-  selfDefending: true,
-  // String obfuscation
+  // String obfuscation: kept, but encoded to keep them recognisable as strings;
+  // splitStrings & stringArrayCallsTransform are OFF because they break ESM
+  // dynamic-import URL rewrites done by Vite/Rollup.
   stringArray: true,
-  stringArrayCallsTransform: true,
-  stringArrayCallsTransformThreshold: 0.75,
-  stringArrayEncoding: ["base64"],
   stringArrayShuffle: true,
-  stringArrayThreshold: 0.85,
-  splitStrings: true,
-  splitStringsChunkLength: 8,
-  transformObjectKeys: true,
+  stringArrayThreshold: 0.7,
+  stringArrayEncoding: ["base64"],
+  stringArrayCallsTransform: false,
+  splitStrings: false,
+  transformObjectKeys: false,
+  // Patterns the obfuscator MUST leave alone.
+  reservedStrings: [
+    "^\\./", "^\\.\\./", "^/assets/", "^https?://",
+    "\\.js$", "\\.mjs$", "\\.css$", "\\.svg$", "\\.png$", "\\.json$", "\\.wasm$",
+  ],
   unicodeEscapeSequence: false,
-  // Do NOT enable debugProtection — it freezes browsers when DevTools open
-  // and breaks ordinary users behind a corporate proxy.
+  selfDefending: false,
   debugProtection: false,
   disableConsoleOutput: false,
   target: "browser",
 };
 
 export default defineConfig(({ mode }) => ({
-  base: "./",
+  base: "/",
   plugins: [
     react(),
-    // Apply heavy obfuscation only to OUR source files in production.
-    // Dependencies (in node_modules) are left alone — they're already minified
-    // and re-obfuscating them slows the runtime a lot.
-    mode === "production" && obfuscator({
+    (mode === "production" && ENABLE_OBFUSCATION) && obfuscator({
       include: ["src/**/*.js", "src/**/*.jsx"],
       exclude: ["node_modules/**"],
       apply: "build",
@@ -54,7 +55,6 @@ export default defineConfig(({ mode }) => ({
 
   build: {
     sourcemap: false,
-    // Terser gives smaller output than esbuild + we control dead-code removal.
     minify: "terser",
     terserOptions: {
       compress: {
@@ -66,8 +66,6 @@ export default defineConfig(({ mode }) => ({
     },
     rollupOptions: {
       output: {
-        // Split big dependencies into separate chunks so each tool only loads
-        // what it needs and updates to one lib don't invalidate everything.
         manualChunks: {
           "react-core": ["react", "react-dom"],
           "antd": ["antd", "dayjs", "date-fns"],
@@ -77,18 +75,18 @@ export default defineConfig(({ mode }) => ({
           "icons": ["lucide-react"],
           "datepicker": ["react-datepicker"],
         },
-        // Cache-busting hashes
         entryFileNames: "assets/[name]-[hash].js",
         chunkFileNames: "assets/[name]-[hash].js",
         assetFileNames: "assets/[name]-[hash].[ext]",
       },
     },
     assetsInlineLimit: 4096,
-    chunkSizeWarningLimit: 800,
+    chunkSizeWarningLimit: 1000,
   },
 
   server: {
     port: 5173,
     strictPort: false,
+    hmr: { host: "localhost" },
   },
 }));
