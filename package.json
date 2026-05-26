@@ -1,5 +1,5 @@
 {
-  "name": "robot_calc_beat",
+  "name": "robot-toolkit",
   "version": "1.0.0",
   "scripts": {
     "dev": "vite",

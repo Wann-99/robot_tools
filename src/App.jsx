@@ -9,8 +9,6 @@ import { DatePicker, ConfigProvider, Select } from "antd";
 import locale from "antd/locale/zh_CN";
 import dayjs from "dayjs";
 import "dayjs/locale/zh-cn";
-import { getIdentity, LOGOUT_URL } from "./lib/cfAccess";
-
 // Lazy-load each tool so the homepage ships with only its own code.
 // Each tool's chunk is fetched on demand the first time the user selects it.
 const RcaLogTool     = lazy(() => import("./components/rca-log/RcaLogTool"));
@@ -19,6 +17,29 @@ const PlanParserTool = lazy(() => import("./components/plan-parser/PlanParserToo
 
 dayjs.locale("zh-cn");
 const { RangePicker } = DatePicker;
+
+/* ============================================================
+   "GREETING" LOGIN — NOT real authentication.
+   This is a UI-only gate so we can show a name in the header and
+   log "who" triggered AI calls. Anyone who reads the bundled JS can
+   trivially bypass it. For real protection, use Cloudflare Access
+   or another edge auth gate.
+   ============================================================ */
+const _OBF_KEY = "RCALOG_2026";
+const encodePwd = (str) => {
+  let encoded = "";
+  for (let i = 0; i < str.length; i++)
+    encoded += String.fromCharCode(str.charCodeAt(i) ^ _OBF_KEY.charCodeAt(i % _OBF_KEY.length));
+  return btoa(encoded);
+};
+const decodePwd = (b64) => {
+  try {
+    const decoded = atob(b64); let str = "";
+    for (let i = 0; i < decoded.length; i++)
+      str += String.fromCharCode(decoded.charCodeAt(i) ^ _OBF_KEY.charCodeAt(i % _OBF_KEY.length));
+    return str;
+  } catch { return ""; }
+};
 
 /* ============================================================
    BEAT ANALYZER — algorithm (unchanged)
@@ -142,7 +163,7 @@ const TOOLS = [
   },
   {
     id: "log-fetcher",
-    name: "抓取log",
+    name: "日志抓取",
     nameEn: "Log Fetcher",
     desc: "通过 FTP / Telnet 协议连接远程设备并拉取日志文件。",
     icon: "🌐",
@@ -211,7 +232,7 @@ function ToolHub({ onSelectTool }) {
   );
 }
 
-function UserAvatarMenu({ username, email, onOpenSettings, onLogout }) {
+function UserAvatarMenu({ username, role, onOpenSettings, onOpenPwd, onLogout }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
@@ -224,7 +245,8 @@ function UserAvatarMenu({ username, email, onOpenSettings, onLogout }) {
     return () => window.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const initial = (username || email || "?").charAt(0).toUpperCase();
+  const isAdmin = role === "admin";
+  const initial = (username || "?").charAt(0).toUpperCase();
 
   return (
     <div className="relative" ref={menuRef}>
@@ -232,12 +254,12 @@ function UserAvatarMenu({ username, email, onOpenSettings, onLogout }) {
         onClick={() => setOpen(v => !v)}
         className={`flex items-center gap-3 rounded-2xl border px-3 py-2 text-left transition-all ${open ? "border-blue-200 bg-blue-50/80 shadow-[0_12px_30px_-22px_rgba(37,99,235,0.7)]" : "border-slate-200 bg-white/90 hover:border-slate-300 hover:bg-white"}`}
       >
-        <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-xs font-black text-white shadow-sm">
+        <div className={`flex h-9 w-9 items-center justify-center rounded-2xl text-xs font-black text-white shadow-sm ${isAdmin ? "bg-gradient-to-br from-violet-600 to-fuchsia-600" : "bg-gradient-to-br from-blue-600 to-indigo-600"}`}>
           {initial}
         </div>
         <div className="hidden min-w-0 sm:flex flex-col items-start leading-tight">
           <div className="max-w-[10rem] truncate text-sm font-bold text-slate-700">{username || "用户"}</div>
-          {email && <div className="max-w-[10rem] truncate text-[11px] text-slate-400">{email}</div>}
+          <div className={`text-[10px] font-bold ${isAdmin ? "text-violet-600" : "text-slate-400"}`}>{isAdmin ? "管理员" : "普通用户"}</div>
         </div>
         <svg className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
@@ -251,19 +273,29 @@ function UserAvatarMenu({ username, email, onOpenSettings, onLogout }) {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.98 }}
             transition={{ duration: 0.12 }}
-            className="absolute right-0 top-full z-50 mt-2 w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-[0_24px_60px_-30px_rgba(15,23,42,0.45)] backdrop-blur"
+            className="absolute right-0 top-full z-50 mt-2 w-56 overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-[0_24px_60px_-30px_rgba(15,23,42,0.45)] backdrop-blur"
           >
             <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
               <div className="text-sm font-bold text-slate-800">{username || "用户"}</div>
-              {email && <div className="mt-0.5 truncate text-xs text-slate-500">{email}</div>}
-              <div className="mt-1 text-[10px] text-slate-400">由 Cloudflare Access 鉴权</div>
+              <div className={`mt-1 text-[11px] ${isAdmin ? "text-violet-600" : "text-slate-500"}`}>
+                {isAdmin ? "管理员账户" : "普通用户账户"}
+              </div>
             </div>
+            {isAdmin && (
+              <button
+                onClick={() => { setOpen(false); onOpenSettings(); }}
+                className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50"
+              >
+                <span className="w-5 text-center">⚙️</span>
+                系统设置
+              </button>
+            )}
             <button
-              onClick={() => { setOpen(false); onOpenSettings(); }}
+              onClick={() => { setOpen(false); onOpenPwd(); }}
               className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50"
             >
-              <span className="w-5 text-center">⚙️</span>
-              AI 设置
+              <span className="w-5 text-center">🔑</span>
+              修改密码
             </button>
             <div className="h-px bg-slate-200" />
             <button
@@ -281,9 +313,177 @@ function UserAvatarMenu({ username, email, onOpenSettings, onLogout }) {
 }
 
 /* ============================================================
+   PASSWORD MODAL
+   ============================================================ */
+function PwdModal({ role, username, accounts, setAccounts, onClose }) {
+  const [form, setForm] = useState({ old: "", next: "", confirm: "" });
+  const [error, setError] = useState("");
+
+  const submit = () => {
+    setError("");
+    if (!form.old || !form.next) return setError("不能为空");
+    if (form.next !== form.confirm) return setError("两次新密码不一致");
+    if (role === "admin") {
+      if (form.old !== decodePwd(accounts.admin.passwordEncoded)) return setError("原密码错误");
+      const upd = { ...accounts, admin: { ...accounts.admin, passwordEncoded: encodePwd(form.next) } };
+      setAccounts(upd); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(upd));
+    } else {
+      const idx = accounts.users.findIndex(u => u.username === username);
+      if (idx === -1) return setError("用户不存在");
+      if (form.old !== decodePwd(accounts.users[idx].passwordEncoded)) return setError("原密码错误");
+      const users = [...accounts.users];
+      users[idx] = { ...users[idx], passwordEncoded: encodePwd(form.next) };
+      const upd = { ...accounts, users };
+      setAccounts(upd); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(upd));
+    }
+    alert("密码已更新");
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="relative w-full max-w-sm rounded-2xl border border-slate-100 bg-white p-6 shadow-2xl">
+        <button onClick={onClose} className="absolute right-4 top-4 rounded-full bg-slate-100 p-1.5 text-slate-400 hover:text-slate-600">
+          <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg>
+        </button>
+        <h3 className="mb-4 text-base font-bold text-slate-800">🔑 修改密码</h3>
+        <div className="space-y-3">
+          {[["原密码", "old"], ["新密码", "next"], ["确认新密码", "confirm"]].map(([label, key]) => (
+            <div key={key}>
+              <label className="mb-1 block text-xs font-bold text-slate-600">{label}</label>
+              <input type="password" value={form[key]} onChange={e => setForm(f => ({ ...f, [key]: e.target.value }))}
+                onKeyDown={e => e.key === "Enter" && submit()}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:bg-white" />
+            </div>
+          ))}
+        </div>
+        {error && <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>}
+        <button onClick={submit} className="mt-5 w-full rounded-xl bg-blue-600 px-4 py-2.5 text-sm font-bold text-white hover:bg-blue-700">
+          保存
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
+   LOGIN PAGE (greeting / display-name only)
+   ============================================================ */
+function LoginPage({ accounts, setAccounts, onLogin }) {
+  const [isRegister, setIsRegister] = useState(false);
+  const [form, setForm] = useState({ username: "", password: "", confirm: "" });
+  const [error, setError] = useState("");
+
+  const submit = () => {
+    setError("");
+    const { username, password, confirm } = form;
+    if (!username || !password) return setError("用户名和密码不能为空");
+    if (isRegister) {
+      if (password !== confirm) return setError("两次密码不一致");
+      if (username === accounts.admin.username || accounts.users.some(u => u.username === username))
+        return setError("用户名已存在");
+      const upd = { ...accounts, users: [...accounts.users, { username, passwordEncoded: encodePwd(password) }] };
+      setAccounts(upd);
+      localStorage.setItem("APP_ACCOUNTS", JSON.stringify(upd));
+      onLogin(username, "user");
+    } else {
+      // admin first
+      if (username === accounts.admin.username && decodePwd(accounts.admin.passwordEncoded) === password) {
+        return onLogin(username, "admin");
+      }
+      const u = accounts.users.find(u => u.username === username && decodePwd(u.passwordEncoded) === password);
+      if (!u) return setError("用户名或密码错误");
+      onLogin(username, "user");
+    }
+  };
+
+  return (
+    <div className="flex min-h-screen w-full items-center justify-center bg-[linear-gradient(180deg,#f8fbff_0%,#f2f6fb_42%,#eef2f7_100%)] px-4">
+      <div className="w-full max-w-sm rounded-3xl border border-slate-200/80 bg-white/95 p-8 shadow-[0_24px_70px_-46px_rgba(15,23,42,0.25)]">
+        <div className="mx-auto mb-5 flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-600 text-white shadow-[0_14px_30px_-16px_rgba(37,99,235,0.55)]">
+          <svg className="h-6 w-6" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 11c2.2 0 4-1.8 4-4s-1.8-4-4-4-4 1.8-4 4 1.8 4 4 4z" />
+            <path strokeLinecap="round" strokeLinejoin="round" d="M4 21c0-4.4 3.6-8 8-8s8 3.6 8 8" />
+          </svg>
+        </div>
+        <h1 className="text-center text-xl font-black tracking-tight text-slate-900">机器人工具集</h1>
+        <div className="text-center text-[11px] font-mono uppercase tracking-[0.2em] text-slate-400">Robot Toolkit</div>
+        <p className="mt-1 text-center text-xs text-slate-500">
+          {isRegister ? "注册新账号" : "请登录"}
+        </p>
+
+        <div className="mt-6 space-y-3">
+          <div>
+            <label className="mb-1 block text-xs font-bold text-slate-600">用户名</label>
+            <input
+              type="text"
+              value={form.username}
+              onChange={e => setForm(f => ({ ...f, username: e.target.value }))}
+              onKeyDown={e => e.key === "Enter" && submit()}
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:bg-white"
+              placeholder="admin"
+            />
+          </div>
+          <div>
+            <label className="mb-1 block text-xs font-bold text-slate-600">密码</label>
+            <input
+              type="password"
+              value={form.password}
+              onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
+              onKeyDown={e => e.key === "Enter" && submit()}
+              className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:bg-white"
+              placeholder="••••••"
+            />
+          </div>
+          {isRegister && (
+            <div>
+              <label className="mb-1 block text-xs font-bold text-slate-600">确认密码</label>
+              <input
+                type="password"
+                value={form.confirm}
+                onChange={e => setForm(f => ({ ...f, confirm: e.target.value }))}
+                onKeyDown={e => e.key === "Enter" && submit()}
+                className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm outline-none focus:border-blue-400 focus:bg-white"
+                placeholder="再输入一次"
+              />
+            </div>
+          )}
+        </div>
+
+        {error && (
+          <div className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">{error}</div>
+        )}
+
+        <button
+          onClick={submit}
+          className="mt-5 w-full rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 px-4 py-2.5 text-sm font-bold text-white shadow-[0_8px_24px_-12px_rgba(37,99,235,0.6)] transition-all hover:-translate-y-0.5"
+        >
+          {isRegister ? "注册并登录" : "登录"}
+        </button>
+
+        <div className="mt-4 flex items-center justify-between text-xs text-slate-500">
+          <button
+            type="button"
+            onClick={() => { setIsRegister(v => !v); setError(""); setForm({ username: "", password: "", confirm: "" }); }}
+            className="text-blue-600 hover:underline"
+          >
+            {isRegister ? "已有账号？登录" : "没有账号？注册"}
+          </button>
+          <span className="text-slate-400">默认 admin/admin123 · user/user123</span>
+        </div>
+
+        <div className="mt-5 rounded-lg border border-amber-100 bg-amber-50/60 px-3 py-2 text-[11px] leading-5 text-amber-700">
+          ⚠ 此登录仅作身份标识，不是真实安全鉴权 —— 账号密码存储在你本地浏览器，所有人可注册。如需真实访问控制，请在前端外层加 Cloudflare Access 等边缘鉴权。
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ============================================================
    BEAT ANALYZER TOOL (full feature, extracted from original App)
    ============================================================ */
-function BeatAnalyzerTool({ username, aiConfig, onAiLog }) {
+function BeatAnalyzerTool({ username, role, aiConfig, onAiLog }) {
   const [result, setResult] = useState(null);
   const [trendData, setTrendData] = useState({});
   const [activePlan, setActivePlan] = useState(null);
@@ -438,7 +638,7 @@ function BeatAnalyzerTool({ username, aiConfig, onAiLog }) {
     const targetData = result && aiTargetPlan ? result[aiTargetPlan] : null;
     if (!targetData) { alert("请先选择一个有效的 Plan"); return; }
     if (!aiConfig.apiKey) {
-      alert("请先在右上角『AI 设置』中配置 API Key"); return;
+      alert(role === "admin" ? "请先在右上角『系统设置』中配置 API Key" : "系统尚未配置 AI 密钥，请联系管理员"); return;
     }
     setIsGeneratingAI(true);
     abortControllerRef.current = new AbortController();
@@ -833,8 +1033,24 @@ ${targetData.nodes.slice(0, 5).map(n => `- ${n.node}: 均值${n.avg.toFixed(3)}s
 /* ============================================================
    MODALS — Settings, Password
    ============================================================ */
-function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, aiLogs }) {
+function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, accounts, setAccounts, aiLogs }) {
+  const [tab, setTab] = useState("users");
   const [balanceInfo, setBalanceInfo] = useState("");
+  const [newUser, setNewUser] = useState({ username: "", password: "" });
+
+  const addUser = () => {
+    if (!newUser.username || !newUser.password) return alert("用户名和密码不能为空");
+    if (newUser.username === accounts.admin.username || accounts.users.some(u => u.username === newUser.username))
+      return alert("用户名已存在");
+    const updated = { ...accounts, users: [...accounts.users, { username: newUser.username, passwordEncoded: encodePwd(newUser.password) }] };
+    setAccounts(updated); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(updated)); setNewUser({ username: "", password: "" });
+  };
+
+  const deleteUser = (username) => {
+    if (!confirm(`确定删除用户 ${username}？`)) return;
+    const updated = { ...accounts, users: accounts.users.filter(u => u.username !== username) };
+    setAccounts(updated); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(updated));
+  };
 
   const checkBalance = async () => {
     setBalanceInfo("查询中…");
@@ -879,25 +1095,53 @@ function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, aiLogs }) {
           <button onClick={onSave} className="w-full py-2.5 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-700 transition-colors">保存配置</button>
         </div>
 
-        {/* AI logs */}
+        {/* users & logs */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <h3 className="text-base font-bold text-slate-800 mb-4">📋 AI 调用记录</h3>
+          <div className="flex gap-1 bg-slate-100 p-1 rounded-lg mb-4">
+            {[["users", "👤 账号管理"], ["logs", "📋 AI 日志"]].map(([id, label]) => (
+              <button key={id} onClick={() => setTab(id)} className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-colors ${tab === id ? "bg-white shadow-sm text-slate-800" : "text-slate-500"}`}>{label}</button>
+            ))}
+          </div>
           <div className="flex-1 overflow-y-auto space-y-2">
-            {aiLogs.length === 0
-              ? <div className="text-center py-8 text-xs text-slate-400">暂无记录</div>
-              : aiLogs.map(log => (
-                <div key={log.id} className="p-2.5 bg-white border border-slate-200 rounded-lg text-xs">
-                  <div className="flex justify-between mb-1">
-                    <span className="font-bold text-slate-700 font-mono bg-slate-100 px-1.5 rounded">{log.username || "—"}</span>
-                    <span className="text-slate-400">{log.time}</span>
+            {tab === "users" && (
+              <>
+                {accounts.users.map((u, i) => (
+                  <div key={i} className="flex items-center justify-between p-2.5 bg-white border border-slate-200 rounded-lg">
+                    <div>
+                      <div className="text-xs font-bold text-slate-700">{u.username}</div>
+                      <div className="text-[10px] text-slate-400">密码: <span className="font-bold text-purple-600">{decodePwd(u.passwordEncoded)}</span></div>
+                    </div>
+                    <button onClick={() => deleteUser(u.username)} className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+                    </button>
                   </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500 truncate max-w-[180px]">{log.plan}</span>
-                    <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${log.status === "成功" ? "bg-emerald-50 text-emerald-600" : log.status === "已取消" ? "bg-orange-50 text-orange-600" : "bg-red-50 text-red-600"}`}>{log.status}</span>
+                ))}
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2 mt-2">
+                  <p className="text-[10px] font-bold text-slate-400 uppercase">添加用户</p>
+                  <div className="flex gap-2">
+                    <input placeholder="用户名" value={newUser.username} onChange={e => setNewUser(u => ({ ...u, username: e.target.value }))} className="flex-1 px-2 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:border-blue-400" />
+                    <input placeholder="密码" value={newUser.password} onChange={e => setNewUser(u => ({ ...u, password: e.target.value }))} className="flex-1 px-2 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:border-blue-400" />
                   </div>
+                  <button onClick={addUser} className="w-full py-1.5 bg-purple-600 text-white text-xs font-bold rounded-lg hover:bg-purple-700">+ 添加</button>
                 </div>
-              ))
-            }
+              </>
+            )}
+            {tab === "logs" && (
+              aiLogs.length === 0
+                ? <div className="text-center py-8 text-xs text-slate-400">暂无记录</div>
+                : aiLogs.map(log => (
+                  <div key={log.id} className="p-2.5 bg-white border border-slate-200 rounded-lg text-xs">
+                    <div className="flex justify-between mb-1">
+                      <span className="font-bold text-slate-700 font-mono bg-slate-100 px-1.5 rounded">{log.username || "—"}</span>
+                      <span className="text-slate-400">{log.time}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500 truncate max-w-[180px]">{log.plan}</span>
+                      <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${log.status === "成功" ? "bg-emerald-50 text-emerald-600" : log.status === "已取消" ? "bg-orange-50 text-orange-600" : "bg-red-50 text-red-600"}`}>{log.status}</span>
+                    </div>
+                  </div>
+                ))
+            )}
           </div>
         </div>
       </div>
@@ -926,20 +1170,43 @@ function ToolLoading() {
 
 export default function App() {
   const [activeTool, setActiveTool] = useState(null); // null = hub
-  // Identity comes from Cloudflare Access (or a local-dev fallback).
-  // It is purely for display — real authorization happens at the edge.
-  const [identity, setIdentity] = useState({ email: "", name: "用户", groups: [] });
+  const [username, setUsername] = useState(() => localStorage.getItem("LOGGED_IN_USERNAME") || null);
+  const [role, setRole] = useState(() => localStorage.getItem("LOGGED_IN_ROLE") || null);
+  // Local "account book" — purely client-side. `admin` is a singleton; `users[]` are regular users.
+  const [accounts, setAccounts] = useState(() => {
+    const s = localStorage.getItem("APP_ACCOUNTS");
+    if (s) {
+      try { const p = JSON.parse(s); if (p?.admin?.passwordEncoded) return p; } catch {}
+    }
+    return {
+      admin: { username: "admin", passwordEncoded: encodePwd("admin123") },
+      users: [{ username: "user", passwordEncoded: encodePwd("user123") }],
+    };
+  });
   const [aiConfig, setAiConfig] = useState(() => {
     const s = localStorage.getItem("AI_CONFIG");
     return s ? JSON.parse(s) : { baseUrl: "https://api.moonshot.cn/v1/chat/completions", model: "moonshot-v1-8k", apiKey: "" };
   });
   const [aiLogs, setAiLogs] = useState(() => { try { return JSON.parse(localStorage.getItem("AI_LOGS") || "[]"); } catch { return []; } });
   const [showSettings, setShowSettings] = useState(false);
+  const [showPwd, setShowPwd] = useState(false);
 
-  useEffect(() => { getIdentity().then(setIdentity); }, []);
+  const handleLogin = (name, r) => {
+    setUsername(name); setRole(r);
+    localStorage.setItem("LOGGED_IN_USERNAME", name);
+    localStorage.setItem("LOGGED_IN_ROLE", r);
+    setActiveTool(null);
+  };
 
-  const addAiLog = (username, plan, status) => {
-    const entry = { id: Date.now(), username, plan, status, time: new Date().toLocaleString() };
+  const handleLogout = () => {
+    setUsername(null); setRole(null);
+    localStorage.removeItem("LOGGED_IN_USERNAME");
+    localStorage.removeItem("LOGGED_IN_ROLE");
+    setActiveTool(null);
+  };
+
+  const addAiLog = (user, plan, status) => {
+    const entry = { id: Date.now(), username: user, plan, status, time: new Date().toLocaleString() };
     setAiLogs(prev => { const u = [entry, ...prev].slice(0, 100); localStorage.setItem("AI_LOGS", JSON.stringify(u)); return u; });
   };
 
@@ -948,9 +1215,11 @@ export default function App() {
     setShowSettings(false);
   };
 
-  const handleLogout = () => { window.location.href = LOGOUT_URL; };
-
   const currentTool = TOOLS.find(t => t.id === activeTool) || null;
+
+  if (!username) {
+    return <LoginPage accounts={accounts} setAccounts={setAccounts} onLogin={handleLogin} />;
+  }
 
   return (
     <>
@@ -980,9 +1249,10 @@ export default function App() {
             </div>
 
             <UserAvatarMenu
-              username={identity.name}
-              email={identity.email}
+              username={username}
+              role={role}
               onOpenSettings={() => setShowSettings(true)}
+              onOpenPwd={() => setShowPwd(true)}
               onLogout={handleLogout}
             />
           </div>
@@ -997,7 +1267,8 @@ export default function App() {
             ) : activeTool === "beat-analyzer" ? (
               <motion.div key="beat" className="h-full overflow-hidden flex" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
                 <BeatAnalyzerTool
-                  username={identity.name}
+                  username={username}
+                  role={role}
                   aiConfig={aiConfig}
                   onAiLog={addAiLog}
                 />
@@ -1019,13 +1290,25 @@ export default function App() {
         </div>
       </div>
 
-      {showSettings && (
+      {showSettings && role === "admin" && (
         <SettingsModal
           aiConfig={aiConfig}
           setAiConfig={setAiConfig}
           onSave={saveAiConfig}
           onClose={() => setShowSettings(false)}
+          accounts={accounts}
+          setAccounts={setAccounts}
           aiLogs={aiLogs}
+        />
+      )}
+
+      {showPwd && (
+        <PwdModal
+          role={role}
+          username={username}
+          accounts={accounts}
+          setAccounts={setAccounts}
+          onClose={() => setShowPwd(false)}
         />
       )}
 
