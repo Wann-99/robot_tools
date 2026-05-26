@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, lazy, Suspense } from "react";
 import {
   LineChart, Line, XAxis, YAxis, Tooltip,
   CartesianGrid, ResponsiveContainer,
@@ -9,31 +9,16 @@ import { DatePicker, ConfigProvider, Select } from "antd";
 import locale from "antd/locale/zh_CN";
 import dayjs from "dayjs";
 import "dayjs/locale/zh-cn";
-import RcaLogTool from "./components/rca-log/RcaLogTool";
-import LogFetcherTool from "./components/log-fetcher/LogFetcherTool";
-import PlanParserTool from "./components/plan-parser/PlanParserTool";
+import { getIdentity, LOGOUT_URL } from "./lib/cfAccess";
+
+// Lazy-load each tool so the homepage ships with only its own code.
+// Each tool's chunk is fetched on demand the first time the user selects it.
+const RcaLogTool     = lazy(() => import("./components/rca-log/RcaLogTool"));
+const LogFetcherTool = lazy(() => import("./components/log-fetcher/LogFetcherTool"));
+const PlanParserTool = lazy(() => import("./components/plan-parser/PlanParserTool"));
 
 dayjs.locale("zh-cn");
 const { RangePicker } = DatePicker;
-
-/* ============================================================
-   AUTH HELPERS
-   ============================================================ */
-const SECRET_KEY = "RCALOG_2026";
-const encodePwd = (str) => {
-  let encoded = "";
-  for (let i = 0; i < str.length; i++)
-    encoded += String.fromCharCode(str.charCodeAt(i) ^ SECRET_KEY.charCodeAt(i % SECRET_KEY.length));
-  return btoa(encoded);
-};
-const decodePwd = (b64) => {
-  try {
-    let decoded = atob(b64), str = "";
-    for (let i = 0; i < decoded.length; i++)
-      str += String.fromCharCode(decoded.charCodeAt(i) ^ SECRET_KEY.charCodeAt(i % SECRET_KEY.length));
-    return str;
-  } catch { return ""; }
-};
 
 /* ============================================================
    BEAT ANALYZER — algorithm (unchanged)
@@ -226,21 +211,20 @@ function ToolHub({ onSelectTool }) {
   );
 }
 
-function UserAvatarMenu({ username, role, onOpenSettings, onOpenPwd, onLogout }) {
+function UserAvatarMenu({ username, email, onOpenSettings, onLogout }) {
   const [open, setOpen] = useState(false);
   const menuRef = useRef(null);
 
   useEffect(() => {
     const handler = (e) => {
-      if (!open) return;
-      if (!menuRef.current) return;
+      if (!open || !menuRef.current) return;
       if (!menuRef.current.contains(e.target)) setOpen(false);
     };
     window.addEventListener("mousedown", handler);
     return () => window.removeEventListener("mousedown", handler);
   }, [open]);
 
-  const initial = (username || "?").charAt(0).toUpperCase();
+  const initial = (username || email || "?").charAt(0).toUpperCase();
 
   return (
     <div className="relative" ref={menuRef}>
@@ -252,8 +236,8 @@ function UserAvatarMenu({ username, role, onOpenSettings, onOpenPwd, onLogout })
           {initial}
         </div>
         <div className="hidden min-w-0 sm:flex flex-col items-start leading-tight">
-          <div className="max-w-[8rem] truncate text-sm font-bold text-slate-700">{username}</div>
-          <div className="text-[11px] text-slate-400">{role === "admin" ? "管理员" : "普通用户"}</div>
+          <div className="max-w-[10rem] truncate text-sm font-bold text-slate-700">{username || "用户"}</div>
+          {email && <div className="max-w-[10rem] truncate text-[11px] text-slate-400">{email}</div>}
         </div>
         <svg className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
@@ -267,27 +251,19 @@ function UserAvatarMenu({ username, role, onOpenSettings, onOpenPwd, onLogout })
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -6, scale: 0.98 }}
             transition={{ duration: 0.12 }}
-            className="absolute right-0 top-full z-50 mt-2 w-56 overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-[0_24px_60px_-30px_rgba(15,23,42,0.45)] backdrop-blur"
+            className="absolute right-0 top-full z-50 mt-2 w-64 overflow-hidden rounded-2xl border border-slate-200 bg-white/95 shadow-[0_24px_60px_-30px_rgba(15,23,42,0.45)] backdrop-blur"
           >
             <div className="border-b border-slate-100 bg-slate-50/80 px-4 py-3">
-              <div className="text-sm font-bold text-slate-800">{username}</div>
-              <div className="mt-1 text-xs text-slate-500">{role === "admin" ? "管理员账户" : "普通用户账户"}</div>
+              <div className="text-sm font-bold text-slate-800">{username || "用户"}</div>
+              {email && <div className="mt-0.5 truncate text-xs text-slate-500">{email}</div>}
+              <div className="mt-1 text-[10px] text-slate-400">由 Cloudflare Access 鉴权</div>
             </div>
-            {role === "admin" && (
-              <button
-                onClick={() => { setOpen(false); onOpenSettings(); }}
-                className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50"
-              >
-                <span className="w-5 text-center">⚙️</span>
-                系统设置
-              </button>
-            )}
             <button
-              onClick={() => { setOpen(false); onOpenPwd(); }}
+              onClick={() => { setOpen(false); onOpenSettings(); }}
               className="flex w-full items-center gap-2 px-4 py-3 text-left text-sm text-slate-700 transition-colors hover:bg-slate-50"
             >
-              <span className="w-5 text-center">🔑</span>
-              修改密码
+              <span className="w-5 text-center">⚙️</span>
+              AI 设置
             </button>
             <div className="h-px bg-slate-200" />
             <button
@@ -307,7 +283,7 @@ function UserAvatarMenu({ username, role, onOpenSettings, onOpenPwd, onLogout })
 /* ============================================================
    BEAT ANALYZER TOOL (full feature, extracted from original App)
    ============================================================ */
-function BeatAnalyzerTool({ loggedInRole, loggedInUsername, aiConfig, onAiLog }) {
+function BeatAnalyzerTool({ username, aiConfig, onAiLog }) {
   const [result, setResult] = useState(null);
   const [trendData, setTrendData] = useState({});
   const [activePlan, setActivePlan] = useState(null);
@@ -462,7 +438,7 @@ function BeatAnalyzerTool({ loggedInRole, loggedInUsername, aiConfig, onAiLog })
     const targetData = result && aiTargetPlan ? result[aiTargetPlan] : null;
     if (!targetData) { alert("请先选择一个有效的 Plan"); return; }
     if (!aiConfig.apiKey) {
-      alert(loggedInRole === "admin" ? "请先设置 API Key" : "系统尚未配置 AI 密钥，请联系管理员"); return;
+      alert("请先在右上角『AI 设置』中配置 API Key"); return;
     }
     setIsGeneratingAI(true);
     abortControllerRef.current = new AbortController();
@@ -488,10 +464,10 @@ ${targetData.nodes.slice(0, 5).map(n => `- ${n.node}: 均值${n.avg.toFixed(3)}s
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a"); a.href = url; a.download = `${aiTargetPlan}_诊断报告.md`;
       document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-      onAiLog(loggedInUsername, aiTargetPlan, "成功");
+      onAiLog(username, aiTargetPlan, "成功");
     } catch (err) {
-      if (err.name === "AbortError") onAiLog(loggedInUsername, aiTargetPlan, "已取消");
-      else { onAiLog(loggedInUsername, aiTargetPlan, "失败"); alert("生成失败：" + err.message); }
+      if (err.name === "AbortError") onAiLog(username, aiTargetPlan, "已取消");
+      else { onAiLog(username, aiTargetPlan, "失败"); alert("生成失败：" + err.message); }
     } finally { setIsGeneratingAI(false); abortControllerRef.current = null; }
   };
 
@@ -857,10 +833,8 @@ ${targetData.nodes.slice(0, 5).map(n => `- ${n.node}: 均值${n.avg.toFixed(3)}s
 /* ============================================================
    MODALS — Settings, Password
    ============================================================ */
-function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, accounts, setAccounts, aiLogs }) {
-  const [tab, setTab] = useState("users");
+function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, aiLogs }) {
   const [balanceInfo, setBalanceInfo] = useState("");
-  const [newUser, setNewUser] = useState({ username: "", password: "" });
 
   const checkBalance = async () => {
     setBalanceInfo("查询中…");
@@ -879,19 +853,6 @@ function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, accounts, setAc
     } catch (e) { setBalanceInfo("查询失败: " + e.message); }
   };
 
-  const addUser = () => {
-    if (!newUser.username || !newUser.password) return alert("用户名和密码不能为空");
-    if (accounts.users.some(u => u.username === newUser.username) || newUser.username === "admin") return alert("用户名已存在");
-    const updated = { ...accounts, users: [...accounts.users, { username: newUser.username, passwordEncoded: encodePwd(newUser.password) }] };
-    setAccounts(updated); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(updated)); setNewUser({ username: "", password: "" });
-  };
-
-  const deleteUser = (username) => {
-    if (!confirm(`确定删除用户 ${username}？`)) return;
-    const updated = { ...accounts, users: accounts.users.filter(u => u.username !== username) };
-    setAccounts(updated); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(updated));
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl p-6 border border-slate-100 flex gap-6 relative">
@@ -902,6 +863,7 @@ function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, accounts, setAc
         {/* AI config */}
         <div className="flex-1 space-y-4 border-r border-slate-100 pr-6">
           <h3 className="text-base font-bold text-slate-800">⚙️ AI 模型配置</h3>
+          <p className="text-[11px] text-slate-500">配置仅保存在你本地浏览器，不会上传服务器</p>
           {[["API Base URL", "baseUrl", "https://api.moonshot.cn/v1/chat/completions"], ["模型名称", "model", "moonshot-v1-8k"], ["API Key", "apiKey", "sk-…"]].map(([label, key, placeholder]) => (
             <div key={key}>
               <label className="block text-xs font-bold text-slate-600 mb-1">{label}</label>
@@ -917,53 +879,25 @@ function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, accounts, setAc
           <button onClick={onSave} className="w-full py-2.5 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-700 transition-colors">保存配置</button>
         </div>
 
-        {/* users & logs */}
+        {/* AI logs */}
         <div className="flex-1 flex flex-col overflow-hidden">
-          <div className="flex gap-1 bg-slate-100 p-1 rounded-lg mb-4">
-            {[["users", "👤 账号管理"], ["logs", "📋 AI 日志"]].map(([id, label]) => (
-              <button key={id} onClick={() => setTab(id)} className={`flex-1 py-1.5 text-xs font-bold rounded-md transition-colors ${tab === id ? "bg-white shadow-sm text-slate-800" : "text-slate-500"}`}>{label}</button>
-            ))}
-          </div>
+          <h3 className="text-base font-bold text-slate-800 mb-4">📋 AI 调用记录</h3>
           <div className="flex-1 overflow-y-auto space-y-2">
-            {tab === "users" && (
-              <>
-                {accounts.users.map((u, i) => (
-                  <div key={i} className="flex items-center justify-between p-2.5 bg-white border border-slate-200 rounded-lg">
-                    <div>
-                      <div className="text-xs font-bold text-slate-700">{u.username}</div>
-                      <div className="text-[10px] text-slate-400">密码: <span className="font-bold text-purple-600">{decodePwd(u.passwordEncoded)}</span></div>
-                    </div>
-                    <button onClick={() => deleteUser(u.username)} className="p-1.5 text-red-400 hover:text-red-600 hover:bg-red-50 rounded transition-colors">
-                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-                    </button>
+            {aiLogs.length === 0
+              ? <div className="text-center py-8 text-xs text-slate-400">暂无记录</div>
+              : aiLogs.map(log => (
+                <div key={log.id} className="p-2.5 bg-white border border-slate-200 rounded-lg text-xs">
+                  <div className="flex justify-between mb-1">
+                    <span className="font-bold text-slate-700 font-mono bg-slate-100 px-1.5 rounded">{log.username || "—"}</span>
+                    <span className="text-slate-400">{log.time}</span>
                   </div>
-                ))}
-                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2 mt-2">
-                  <p className="text-[10px] font-bold text-slate-400 uppercase">添加用户</p>
-                  <div className="flex gap-2">
-                    <input placeholder="用户名" value={newUser.username} onChange={e => setNewUser(u => ({ ...u, username: e.target.value }))} className="flex-1 px-2 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:border-blue-400" />
-                    <input placeholder="密码" value={newUser.password} onChange={e => setNewUser(u => ({ ...u, password: e.target.value }))} className="flex-1 px-2 py-1.5 text-xs border border-slate-200 rounded-lg bg-white focus:outline-none focus:border-blue-400" />
+                  <div className="flex justify-between">
+                    <span className="text-slate-500 truncate max-w-[180px]">{log.plan}</span>
+                    <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${log.status === "成功" ? "bg-emerald-50 text-emerald-600" : log.status === "已取消" ? "bg-orange-50 text-orange-600" : "bg-red-50 text-red-600"}`}>{log.status}</span>
                   </div>
-                  <button onClick={addUser} className="w-full py-1.5 bg-purple-600 text-white text-xs font-bold rounded-lg hover:bg-purple-700">+ 添加</button>
                 </div>
-              </>
-            )}
-            {tab === "logs" && (
-              aiLogs.length === 0
-                ? <div className="text-center py-8 text-xs text-slate-400">暂无记录</div>
-                : aiLogs.map(log => (
-                  <div key={log.id} className="p-2.5 bg-white border border-slate-200 rounded-lg text-xs">
-                    <div className="flex justify-between mb-1">
-                      <span className="font-bold text-slate-700 font-mono bg-slate-100 px-1.5 rounded">{log.username}</span>
-                      <span className="text-slate-400">{log.time}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500 truncate max-w-[180px]">{log.plan}</span>
-                      <span className={`font-bold px-2 py-0.5 rounded text-[10px] ${log.status === "成功" ? "bg-emerald-50 text-emerald-600" : log.status === "已取消" ? "bg-orange-50 text-orange-600" : "bg-red-50 text-red-600"}`}>{log.status}</span>
-                    </div>
-                  </div>
-                ))
-            )}
+              ))
+            }
           </div>
         </div>
       </div>
@@ -971,179 +905,38 @@ function SettingsModal({ aiConfig, setAiConfig, onSave, onClose, accounts, setAc
   );
 }
 
-function PwdModal({ loggedInRole, loggedInUsername, accounts, setAccounts, onClose }) {
-  const [form, setForm] = useState({ old: "", next: "" });
-  const submit = () => {
-    if (!form.old || !form.next) return alert("不能为空");
-    if (loggedInRole === "admin") {
-      if (form.old !== decodePwd(accounts.admin.passwordEncoded)) return alert("原密码错误");
-      const upd = { ...accounts, admin: { ...accounts.admin, passwordEncoded: encodePwd(form.next) } };
-      setAccounts(upd); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(upd));
-    } else {
-      const idx = accounts.users.findIndex(u => u.username === loggedInUsername);
-      if (idx === -1) return alert("用户不存在");
-      if (form.old !== decodePwd(accounts.users[idx].passwordEncoded)) return alert("原密码错误");
-      const users = [...accounts.users]; users[idx].passwordEncoded = encodePwd(form.next);
-      const upd = { ...accounts, users }; setAccounts(upd); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(upd));
-    }
-    alert("修改成功"); onClose();
-  };
-  return (
-    <div className="fixed inset-0 z-60 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-      <div className="bg-white rounded-2xl shadow-xl w-80 p-6 border border-slate-100 relative">
-        <button onClick={onClose} className="absolute top-4 right-4 text-slate-400 hover:text-slate-600"><svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"/></svg></button>
-        <h3 className="text-base font-bold text-slate-800 mb-4">修改密码</h3>
-        <div className="space-y-3">
-          <input type="password" placeholder="原密码" value={form.old} onChange={e => setForm(f => ({ ...f, old: e.target.value }))} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-blue-400" />
-          <input type="password" placeholder="新密码" value={form.next} onChange={e => setForm(f => ({ ...f, next: e.target.value }))} className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm focus:outline-none focus:border-blue-400" />
-          <button onClick={submit} className="w-full py-2.5 bg-blue-600 text-white text-sm font-bold rounded-xl hover:bg-blue-700">确认修改</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/* ============================================================
-   LOGIN PAGE
-   ============================================================ */
-function LoginPage({ accounts, setAccounts, onLogin, encodePwd, decodePwd }) {
-  const [isRegister, setIsRegister] = useState(false);
-  const [form, setForm] = useState({ username: "", password: "", confirm: "" });
-  const [error, setError] = useState("");
-  const [history] = useState(() => { try { return JSON.parse(localStorage.getItem("LOGIN_HISTORY") || "[]"); } catch { return []; } });
-  const [showHistory, setShowHistory] = useState(false);
-
-  const saveHistory = (username) => {
-    const h = [username, ...history.filter(u => u !== username)].slice(0, 5);
-    localStorage.setItem("LOGIN_HISTORY", JSON.stringify(h));
-  };
-
-  const submit = () => {
-    if (isRegister) {
-      const { username, password, confirm } = form;
-      if (!username || !password) return setError("不能为空");
-      if (password !== confirm) return setError("密码不一致");
-      if (username === "admin" || accounts.users.some(u => u.username === username)) return setError("用户名已被注册");
-      const upd = { ...accounts, users: [...accounts.users, { username, passwordEncoded: encodePwd(password) }] };
-      setAccounts(upd); localStorage.setItem("APP_ACCOUNTS", JSON.stringify(upd));
-      saveHistory(username); onLogin(username, "user");
-    } else {
-      if (form.username === accounts.admin.username && form.password === decodePwd(accounts.admin.passwordEncoded)) {
-        saveHistory(form.username); onLogin(form.username, "admin");
-      } else {
-        const u = accounts.users.find(u => u.username === form.username && decodePwd(u.passwordEncoded) === form.password);
-        if (u) { saveHistory(form.username); onLogin(form.username, "user"); }
-        else setError("账号或密码错误");
-      }
-    }
-  };
-
-  return (
-    <div className="h-screen w-full flex items-center justify-center bg-slate-900 overflow-hidden relative">
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_center,_var(--tw-gradient-stops))] from-blue-900/40 via-slate-900 to-slate-900 pointer-events-none" />
-      <div className="relative z-10 flex flex-col md:flex-row items-center justify-center w-full max-w-4xl px-4 gap-12">
-        {/* brand */}
-        <motion.div initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} transition={{ duration: 0.6 }} className="flex flex-col items-center">
-          <div className="w-24 h-24 bg-gradient-to-br from-blue-500 to-indigo-600 rounded-[2rem] shadow-[0_0_60px_rgba(37,99,235,0.5)] flex items-center justify-center mb-6 border border-white/20">
-            <svg className="w-14 h-14 text-white" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M12 2v2m0 4V6m0 0a2 2 0 100-4 2 2 0 000 4z"/><path d="M5 8h14a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2v-8a2 2 0 012-2z"/><path d="M2 11h1M21 11h1"/><line x1="8" y1="13" x2="8.01" y2="13" strokeWidth="3"/><line x1="16" y1="13" x2="16.01" y2="13" strokeWidth="3"/><path d="M9 17h6"/>
-            </svg>
-          </div>
-          <h1 className="text-4xl font-black text-white tracking-tight">RCA.log</h1>
-          <h2 className="text-lg font-semibold text-blue-400 mt-1 uppercase tracking-widest">Tools</h2>
-          <p className="text-slate-400 text-sm mt-3 text-center max-w-56">机器人控制系统日志分析工具集</p>
-        </motion.div>
-
-        {/* login card */}
-        <motion.div initial={{ opacity: 0, x: 30 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: 0.6, delay: 0.1 }}
-          className="w-full max-w-sm bg-white/5 backdrop-blur-xl rounded-2xl border border-white/10 shadow-2xl p-8">
-          <h3 className="text-xl font-bold text-white mb-1">{isRegister ? "注册账号" : "登录系统"}</h3>
-          <p className="text-slate-400 text-xs mb-6">{isRegister ? "创建普通用户账号" : "请输入账号密码"}</p>
-
-          <div className="space-y-4">
-            <div className="relative">
-              <input type="text" placeholder="用户名" value={form.username}
-                onChange={e => { setForm(f => ({ ...f, username: e.target.value })); setShowHistory(false); }}
-                onFocus={() => history.length > 0 && !isRegister && setShowHistory(true)}
-                onBlur={() => setTimeout(() => setShowHistory(false), 150)}
-                className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-                onKeyDown={e => e.key === "Enter" && submit()} />
-              <AnimatePresence>
-                {showHistory && (
-                  <motion.div initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }}
-                    className="absolute z-50 w-full mt-1 bg-slate-800 border border-slate-700 rounded-xl overflow-hidden shadow-xl">
-                    {history.map(u => (
-                      <div key={u} onClick={() => { setForm(f => ({ ...f, username: u })); setShowHistory(false); }}
-                        className="px-4 py-2.5 text-sm text-slate-300 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors">{u}</div>
-                    ))}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
-            <input type="password" placeholder="密码" value={form.password} onChange={e => setForm(f => ({ ...f, password: e.target.value }))}
-              className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 transition-all"
-              onKeyDown={e => e.key === "Enter" && submit()} />
-            <AnimatePresence>
-              {isRegister && (
-                <motion.input initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }}
-                  type="password" placeholder="确认密码" value={form.confirm} onChange={e => setForm(f => ({ ...f, confirm: e.target.value }))}
-                  className="w-full bg-slate-800/50 border border-slate-700 rounded-xl px-4 py-3 text-white text-sm focus:outline-none focus:border-blue-500 transition-all" />
-              )}
-            </AnimatePresence>
-            <AnimatePresence>
-              {error && <motion.p initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="text-red-400 text-xs flex items-center gap-1.5">⚠ {error}</motion.p>}
-            </AnimatePresence>
-            <button onClick={submit} className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3 rounded-xl transition-colors">
-              {isRegister ? "注册并登录" : "登录"}
-            </button>
-            <button onClick={() => { setIsRegister(v => !v); setError(""); setForm({ username: "", password: "", confirm: "" }); }}
-              className="w-full text-slate-400 hover:text-blue-400 text-xs transition-colors">
-              {isRegister ? "已有账号？返回登录" : "没有账号？注册"}
-            </button>
-          </div>
-        </motion.div>
-      </div>
-    </div>
-  );
-}
 
 /* ============================================================
    ROOT APP
    ============================================================ */
+// Loading fallback shown while a tool chunk is being fetched.
+function ToolLoading() {
+  return (
+    <div className="flex h-full w-full items-center justify-center">
+      <div className="flex flex-col items-center gap-3 text-slate-500">
+        <svg className="h-8 w-8 animate-spin text-blue-500" fill="none" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" opacity="0.25" />
+          <path d="M22 12a10 10 0 00-10-10" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+        </svg>
+        <span className="text-sm">加载工具中…</span>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
-  const [appState, setAppState] = useState("login"); // login | app
   const [activeTool, setActiveTool] = useState(null); // null = hub
-  const [loggedInRole, setLoggedInRole] = useState(() => localStorage.getItem("LOGGED_IN_ROLE") || null);
-  const [loggedInUsername, setLoggedInUsername] = useState(() => localStorage.getItem("LOGGED_IN_USERNAME") || null);
-  const [accounts, setAccounts] = useState(() => {
-    const s = localStorage.getItem("APP_ACCOUNTS");
-    if (s) { try { const p = JSON.parse(s); if (p?.admin?.passwordEncoded) return p; } catch {} }
-    return { admin: { username: "admin", passwordEncoded: encodePwd("admin123") }, users: [{ username: "user", passwordEncoded: encodePwd("user123") }] };
-  });
+  // Identity comes from Cloudflare Access (or a local-dev fallback).
+  // It is purely for display — real authorization happens at the edge.
+  const [identity, setIdentity] = useState({ email: "", name: "用户", groups: [] });
   const [aiConfig, setAiConfig] = useState(() => {
     const s = localStorage.getItem("AI_CONFIG");
     return s ? JSON.parse(s) : { baseUrl: "https://api.moonshot.cn/v1/chat/completions", model: "moonshot-v1-8k", apiKey: "" };
   });
   const [aiLogs, setAiLogs] = useState(() => { try { return JSON.parse(localStorage.getItem("AI_LOGS") || "[]"); } catch { return []; } });
   const [showSettings, setShowSettings] = useState(false);
-  const [showPwd, setShowPwd] = useState(false);
 
-  useEffect(() => {
-    if (loggedInRole) setAppState("app");
-  }, []);
-
-  const handleLogin = (username, role) => {
-    setLoggedInRole(role); setLoggedInUsername(username);
-    localStorage.setItem("LOGGED_IN_ROLE", role); localStorage.setItem("LOGGED_IN_USERNAME", username);
-    setActiveTool(null);
-    setAppState("app");
-  };
-
-  const handleLogout = () => {
-    setLoggedInRole(null); setLoggedInUsername(null);
-    localStorage.removeItem("LOGGED_IN_ROLE"); localStorage.removeItem("LOGGED_IN_USERNAME");
-    setAppState("login"); setActiveTool(null);
-  };
+  useEffect(() => { getIdentity().then(setIdentity); }, []);
 
   const addAiLog = (username, plan, status) => {
     const entry = { id: Date.now(), username, plan, status, time: new Date().toLocaleString() };
@@ -1155,11 +948,9 @@ export default function App() {
     setShowSettings(false);
   };
 
-  const currentTool = TOOLS.find(t => t.id === activeTool) || null;
+  const handleLogout = () => { window.location.href = LOGOUT_URL; };
 
-  if (appState === "login") {
-    return <LoginPage accounts={accounts} setAccounts={setAccounts} onLogin={handleLogin} encodePwd={encodePwd} decodePwd={decodePwd} />;
-  }
+  const currentTool = TOOLS.find(t => t.id === activeTool) || null;
 
   return (
     <>
@@ -1189,10 +980,9 @@ export default function App() {
             </div>
 
             <UserAvatarMenu
-              username={loggedInUsername}
-              role={loggedInRole}
+              username={identity.name}
+              email={identity.email}
               onOpenSettings={() => setShowSettings(true)}
-              onOpenPwd={() => setShowPwd(true)}
               onLogout={handleLogout}
             />
           </div>
@@ -1207,23 +997,22 @@ export default function App() {
             ) : activeTool === "beat-analyzer" ? (
               <motion.div key="beat" className="h-full overflow-hidden flex" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
                 <BeatAnalyzerTool
-                  loggedInRole={loggedInRole}
-                  loggedInUsername={loggedInUsername}
+                  username={identity.name}
                   aiConfig={aiConfig}
                   onAiLog={addAiLog}
                 />
               </motion.div>
             ) : activeTool === "rca-log-analyzer" ? (
               <motion.div key="rca-log" className="flex h-full min-h-0 overflow-y-auto" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-                <RcaLogTool />
+                <Suspense fallback={<ToolLoading />}><RcaLogTool /></Suspense>
               </motion.div>
             ) : activeTool === "log-fetcher" ? (
               <motion.div key="log-fetcher" className="flex h-full min-h-0 overflow-y-auto" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-                <LogFetcherTool />
+                <Suspense fallback={<ToolLoading />}><LogFetcherTool /></Suspense>
               </motion.div>
             ) : activeTool === "plan-parser" ? (
               <motion.div key="plan-parser" className="flex h-full min-h-0 overflow-hidden" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: 0.15 }}>
-                <PlanParserTool />
+                <Suspense fallback={<ToolLoading />}><PlanParserTool /></Suspense>
               </motion.div>
             ) : null}
           </AnimatePresence>
@@ -1236,19 +1025,7 @@ export default function App() {
           setAiConfig={setAiConfig}
           onSave={saveAiConfig}
           onClose={() => setShowSettings(false)}
-          accounts={accounts}
-          setAccounts={setAccounts}
           aiLogs={aiLogs}
-        />
-      )}
-
-      {showPwd && (
-        <PwdModal
-          loggedInRole={loggedInRole}
-          loggedInUsername={loggedInUsername}
-          accounts={accounts}
-          setAccounts={setAccounts}
-          onClose={() => setShowPwd(false)}
         />
       )}
 

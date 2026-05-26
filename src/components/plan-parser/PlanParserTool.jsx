@@ -104,30 +104,162 @@ function refsToObject(acc) {
   return out;
 }
 
+/**
+ * Format one parameter (lhs or rhs of a param_assignment) for display.
+ * @returns { text, category, type, name, module_name, data }
+ */
+function formatParam(p) {
+  if (!p) return { text: "?" };
+  if (p.category === "CONST") {
+    return { text: `"${p.data ?? ""}"`, category: "CONST", type: p.type, data: p.data };
+  }
+  const display = p.module_name && p.module_name !== "rootNode"
+    ? `${p.module_name}.${p.name || "?"}`
+    : (p.name || "?");
+  return {
+    text: display,
+    category: p.category, type: p.type,
+    name: p.name, module_name: p.module_name,
+  };
+}
+
+function parseAssignment(a) {
+  return { lhs: formatParam(a.lhs_param), rhs: formatParam(a.rhs_param) };
+}
+
+/**
+ * Order transits by actual execution flow:
+ *   1. Find the entry node (a node that is a `from` but never a `to`, prefer "startNode").
+ *   2. BFS from the entry — list each node's outgoing transits in declaration order,
+ *      then enqueue the destinations.
+ *   3. Any transit not reachable from the entry (orphan / pure cycle) is appended at the end.
+ */
+function orderTransitsByFlow(transits) {
+  if (!transits.length) return transits;
+  const adj = new Map();
+  transits.forEach(t => {
+    if (!adj.has(t.from)) adj.set(t.from, []);
+    adj.get(t.from).push(t);
+  });
+
+  const froms = new Set(transits.map(t => t.from));
+  const tos = new Set(transits.map(t => t.to));
+  const sources = Array.from(froms).filter(n => !tos.has(n));
+  let entry;
+  if (sources.includes("startNode")) entry = "startNode";
+  else if (sources.length) entry = sources[0];
+  else entry = transits[0].from;
+
+  const ordered = [];
+  const seenTransit = new Set();
+  const seenNode = new Set();
+  const queue = [entry];
+
+  const key = (t) => `${t.from}>>${t.to}#${t.name}`;
+
+  while (queue.length) {
+    const node = queue.shift();
+    if (seenNode.has(node)) continue;
+    seenNode.add(node);
+    for (const t of adj.get(node) || []) {
+      const k = key(t);
+      if (seenTransit.has(k)) continue;
+      seenTransit.add(k);
+      ordered.push(t);
+      if (!seenNode.has(t.to)) queue.push(t.to);
+    }
+  }
+  // append unreachable (cycle-only / orphan) transits last
+  transits.forEach(t => {
+    const k = key(t);
+    if (!seenTransit.has(k)) { seenTransit.add(k); ordered.push(t); }
+  });
+  return ordered;
+}
+
 function parsePlanBlock(planAst, parentName) {
   const planName = planAst.plan_name || "";
-  const configNodes = asArray(planAst.config).map(c => {
-    const refs = refsToObject(extractRefs(c));
+
+  // `config` is the plan-level root info (rootNode metadata), keep as a single entry.
+  const rootConfig = planAst.config ? {
+    node_name: planAst.config.node_name || "",
+    pt_name: planAst.config.pt_name || "",
+    pt_type: planAst.config.pt_type || "",
+    raw: planAst.config,
+  } : null;
+
+  // The actual flow nodes live in `node_list`.
+  const nodes = asArray(planAst.node_list).map(n => {
+    const assignments = asArray(n.param_assignment).map(parseAssignment);
+    // GOTO target: find the assignment where lhs.name === "nodeName"
+    const gotoTarget = (n.pt_type === "GOTO")
+      ? assignments.find(a => a.lhs.name === "nodeName")?.rhs.data || ""
+      : "";
     return {
-      node_name: c.node_name || "",
-      pt_name: c.pt_name || "",
-      pt_type: c.pt_type || "",
-      goto_target: c.goto_target || c.target || (typeof c.data === "string" ? c.data : ""),
-      refs,                   // per-node references (already grouped)
-      raw: c,
+      node_name: n.node_name || "",
+      pt_name: n.pt_name || "",
+      pt_type: n.pt_type || "",
+      tool_name: n.switch_tcp_param?.tool_name || "",
+      assignments,
+      goto_target: gotoTarget,
+      refs: refsToObject(extractRefs(n)),
+      raw: n,
     };
   });
-  const transits = asArray(planAst.transit_list).map(t => ({
-    from: t.start_node_name || "",
-    to: t.end_node_name || "",
-    name: t.transit_name || "",
-    condition: formatCondition(t.trigger_condition),
-    refs: refsToObject(extractRefs(t.trigger_condition)),
+
+  // Variable-assignment edges (between two nodes).
+  const expressions = asArray(planAst.expression_set_list).map(e => {
+    const assigns = [];
+    asArray(e.param_expression).forEach(pe => {
+      asArray(pe.param_assignment).forEach(pa => assigns.push(parseAssignment(pa)));
+    });
+    return {
+      name: e.expression_set_name || "",
+      desc: e.expression_set_desc || "",
+      from: e.start_node_name || "",
+      to: e.end_node_name || "",
+      assignments: assigns,
+    };
+  });
+
+  // GPIO output commands attached to a node (with their own trigger condition).
+  const gpioCmds = asArray(planAst.gpio_commands).map(g => ({
+    device: g.device_name || "",
+    node_name: g.node_name || "",
+    one_time_only: !!g.one_time_only,
+    condition: formatCondition(g.trigger_condition),
+    assignments: asArray(g.param_assignment).map(parseAssignment),
+    desc: g.command_description || "",
   }));
+
+  const transits = asArray(planAst.transit_list).map(t => {
+    const expr = expressions.find(e => e.from === t.start_node_name && e.to === t.end_node_name) || null;
+    return {
+      from: t.start_node_name || "",
+      to: t.end_node_name || "",
+      name: t.transit_name || "",
+      condition: formatCondition(t.trigger_condition),
+      refs: refsToObject(extractRefs(t.trigger_condition)),
+      expressionSet: expr,
+    };
+  });
+
   const projVars = asArray(planAst.proj_var_list).map(v => ({ ...v, plan: planName, category: v.category || "PROJ_VAR" }));
   const planVars = asArray(planAst.plan_var_list).map(v => ({ ...v, plan: planName, category: v.category || "PLAN_VAR" }));
   const children = asArray(planAst.child_plans).map(c => parsePlanBlock(c, planName));
-  return { plan_name: planName, parent: parentName, configNodes, transits, projVars, planVars, children };
+
+  return {
+    plan_name: planName,
+    parent: parentName,
+    rootConfig,
+    nodes,                  // real nodes from node_list
+    transits,
+    expressions,
+    gpioCmds,
+    projVars, planVars,
+    children,
+    desc: planAst.plan_desc || "",
+  };
 }
 
 function buildModel(projAst, planAst) {
@@ -135,36 +267,27 @@ function buildModel(projAst, planAst) {
   const allPlans = [];
   (function walk(p) { allPlans.push(p); p.children.forEach(walk); })(root);
 
-  // collect all referenced params across the tree
+  // collect all referenced params across the tree (nodes + transits + expressions + gpio cmds)
   const allRefs = {};
+  const collect = (subtree, p, ctxNode) => {
+    Object.entries(refsToObject(extractRefs(subtree))).forEach(([cat, items]) => {
+      if (!allRefs[cat]) allRefs[cat] = new Map();
+      items.forEach(it => {
+        if (!allRefs[cat].has(it.name)) {
+          allRefs[cat].set(it.name, { ...it, modules: new Set(), plans: new Set(), nodes: new Set() });
+        }
+        const r = allRefs[cat].get(it.name);
+        if (it.module_name) r.modules.add(it.module_name);
+        r.plans.add(p.plan_name);
+        if (ctxNode) r.nodes.add(`${p.plan_name}/${ctxNode}`);
+      });
+    });
+  };
   allPlans.forEach(p => {
-    p.configNodes.forEach(c => {
-      Object.entries(c.refs).forEach(([cat, items]) => {
-        if (!allRefs[cat]) allRefs[cat] = new Map();
-        items.forEach(it => {
-          if (!allRefs[cat].has(it.name)) {
-            allRefs[cat].set(it.name, { ...it, modules: new Set(), plans: new Set(), nodes: new Set() });
-          }
-          const r = allRefs[cat].get(it.name);
-          if (it.module_name) r.modules.add(it.module_name);
-          r.plans.add(p.plan_name);
-          r.nodes.add(`${p.plan_name}/${c.node_name}`);
-        });
-      });
-    });
-    p.transits.forEach(t => {
-      Object.entries(t.refs).forEach(([cat, items]) => {
-        if (!allRefs[cat]) allRefs[cat] = new Map();
-        items.forEach(it => {
-          if (!allRefs[cat].has(it.name)) {
-            allRefs[cat].set(it.name, { ...it, modules: new Set(), plans: new Set(), nodes: new Set() });
-          }
-          const r = allRefs[cat].get(it.name);
-          if (it.module_name) r.modules.add(it.module_name);
-          r.plans.add(p.plan_name);
-        });
-      });
-    });
+    p.nodes.forEach(n => collect(n.raw, p, n.node_name));
+    p.transits.forEach(t => collect(t, p));
+    p.expressions.forEach(e => collect(e, p));
+    p.gpioCmds.forEach(g => collect(g, p, g.node_name));
   });
 
   // declared vars
@@ -211,11 +334,17 @@ function buildModel(projAst, planAst) {
   });
   variables.sort((a, b) => a.name.localeCompare(b.name));
 
-  // node type counts
+  // node type counts (from node_list across all plans + child sub-plan headers)
   const nodeTypeCounts = {};
-  allPlans.forEach(p => p.configNodes.forEach(c => {
-    if (c.pt_type) nodeTypeCounts[c.pt_type] = (nodeTypeCounts[c.pt_type] || 0) + 1;
-  }));
+  allPlans.forEach(p => {
+    p.nodes.forEach(n => {
+      if (n.pt_type) nodeTypeCounts[n.pt_type] = (nodeTypeCounts[n.pt_type] || 0) + 1;
+    });
+    // each child plan also counts as a PLAN node in its parent
+    if (p.rootConfig?.pt_type === "PLAN" && p.parent) {
+      nodeTypeCounts.PLAN = (nodeTypeCounts.PLAN || 0) + 1;
+    }
+  });
 
   const overview = {
     project_name: projAst.project_name || planAst.plan_name || "",
@@ -619,8 +748,12 @@ function VarGroupTable({ category, rows }) {
                 <td className="px-3 py-2"><TypeChip type={v.type} /></td>
                 <td className="px-3 py-2 font-mono text-[11px] text-slate-500 break-all">{String(v.defaultValue ?? "") || <span className="text-slate-300">—</span>}</td>
                 <td className="px-3 py-2 font-mono text-[11px] text-slate-500">{v.unit || <span className="text-slate-300">—</span>}</td>
-                <td className="px-3 py-2 font-mono text-[11px] text-slate-500">{v.modules?.length ? v.modules.slice(0, 3).join(", ") + (v.modules.length > 3 ? ` +${v.modules.length - 3}` : "") : "—"}</td>
-                <td className="px-3 py-2 font-mono text-[11px] text-slate-500">{v.plans?.length ? v.plans.slice(0, 3).join(", ") + (v.plans.length > 3 ? ` +${v.plans.length - 3}` : "") : "—"}</td>
+                <td className="px-3 py-2 font-mono text-[11px] text-slate-500" title={v.modules?.join("\n") || ""}>
+                  {v.modules?.length ? v.modules.slice(0, 3).join(", ") + (v.modules.length > 3 ? ` 等 ${v.modules.length} 个` : "") : "—"}
+                </td>
+                <td className="px-3 py-2 font-mono text-[11px] text-slate-500" title={v.plans?.join("\n") || ""}>
+                  {v.plans?.length ? v.plans.slice(0, 3).join(", ") + (v.plans.length > 3 ? ` 等 ${v.plans.length} 个` : "") : "—"}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -661,131 +794,216 @@ function FlowPane({ root, allPlans }) {
 }
 
 function PlanFlowDetail({ plan, isRoot }) {
-  const startNodes = plan.configNodes.filter(n => n.pt_type !== "GOTO" && n.node_name !== "rootNode");
   const nodeByName = useMemo(() => {
     const m = new Map();
-    plan.configNodes.forEach(c => m.set(c.node_name, c));
+    plan.nodes.forEach(n => m.set(n.node_name, n));
+    if (plan.rootConfig) m.set(plan.rootConfig.node_name, plan.rootConfig);
     return m;
   }, [plan]);
 
-  // build outgoing adjacency
-  const outgoing = useMemo(() => {
-    const m = new Map();
-    plan.transits.forEach((t, idx) => {
-      if (!m.has(t.from)) m.set(t.from, []);
-      m.get(t.from).push({ ...t, idx });
+  // Order transits by actual execution flow (BFS from startNode),
+  // not by file declaration order.
+  const orderedTransits = useMemo(() => orderTransitsByFlow(plan.transits), [plan.transits]);
+
+  // GPIO commands grouped by their host node
+  const gpioByNode = useMemo(() => {
+    const m = {};
+    plan.gpioCmds.forEach(g => {
+      if (!m[g.node_name]) m[g.node_name] = [];
+      m[g.node_name].push(g);
     });
     return m;
   }, [plan]);
 
+  // Count signals/assignments for header stats
+  const totalAssigns = plan.expressions.reduce((a, e) => a + e.assignments.length, 0);
+  const totalGpioOps = plan.gpioCmds.reduce((a, g) => a + g.assignments.length, 0);
+
   return (
     <>
       <Card>
-        <div className="flex items-center gap-3">
-          <div className={`flex h-9 w-9 items-center justify-center rounded-xl text-white shadow-md ${isRoot ? "bg-amber-500" : "bg-blue-500"}`}>
-            {isRoot ? <Workflow className="h-4 w-4" /> : <Layer />}
+        <div className="flex items-start gap-4">
+          <div className={`flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-white shadow-md ${isRoot ? "bg-amber-500" : "bg-blue-500"}`}>
+            {isRoot ? <Workflow className="h-5 w-5" /> : <SubPlanIcon />}
           </div>
-          <div>
-            <div className="text-lg font-bold text-slate-900">{plan.plan_name}</div>
-            <div className="text-xs text-slate-500">
-              {isRoot ? "主流程 (rootNode)" : `子计划 · 父级: ${plan.parent}`}
-              {" · "}{plan.configNodes.length - 1} 节点 · {plan.transits.length} 跳转
-              {plan.children.length > 0 && ` · 内嵌 ${plan.children.length} 个子计划`}
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline gap-2">
+              <span className="text-lg font-bold text-slate-900">{plan.plan_name}</span>
+              <span className="text-xs text-slate-500">{isRoot ? "主流程" : `子计划 · 父: ${plan.parent}`}</span>
+            </div>
+            {plan.desc && <div className="mt-1 text-sm text-slate-600">{plan.desc}</div>}
+            <div className="mt-2 flex flex-wrap gap-3 text-xs text-slate-500">
+              <Stat label="节点" value={plan.nodes.length} />
+              <Stat label="跳转" value={plan.transits.length} />
+              <Stat label="变量赋值" value={totalAssigns} accent="violet" />
+              <Stat label="GPIO 指令" value={plan.gpioCmds.length} accent="amber" />
+              <Stat label="GPIO 写入项" value={totalGpioOps} accent="amber" />
+              {plan.children.length > 0 && <Stat label="子计划" value={plan.children.length} accent="blue" />}
             </div>
           </div>
         </div>
       </Card>
 
-      {/* Transit flow */}
       <Card>
         <SectionTitle icon={Workflow}>跳转流程</SectionTitle>
-        {plan.transits.length === 0 ? (
+        {orderedTransits.length === 0 ? (
           <div className="py-6 text-center text-sm text-slate-400">此计划无跳转</div>
         ) : (
           <div className="space-y-2">
-            {plan.transits.map((t, i) => (
-              <TransitStep key={i} step={i + 1} transit={t} fromNode={nodeByName.get(t.from)} toNode={nodeByName.get(t.to)} />
+            {orderedTransits.map((t, i) => (
+              <TransitRow key={`${t.from}->${t.to}-${t.name}`} step={i + 1} transit={t}
+                fromNode={nodeByName.get(t.from)} toNode={nodeByName.get(t.to)}
+                gpioAtTo={gpioByNode[t.to] || []}
+              />
             ))}
           </div>
         )}
       </Card>
 
-      {/* Node detail */}
       <Card>
         <SectionTitle icon={Boxes}>节点详情</SectionTitle>
-        <div className="space-y-2">
-          {startNodes.map(n => (
-            <NodeDetail key={n.node_name} node={n} outgoing={outgoing.get(n.node_name) || []} />
-          ))}
-        </div>
+        {plan.nodes.length === 0 ? (
+          <div className="py-6 text-center text-sm text-slate-400">此计划无节点</div>
+        ) : (
+          <div className="space-y-2">
+            {plan.nodes.map(n => (
+              <NodeCard key={n.node_name} node={n} gpioCmds={gpioByNode[n.node_name] || []} />
+            ))}
+          </div>
+        )}
       </Card>
     </>
   );
 }
 
-function Layer() {
-  // small icon for sub-plan (avoids lucide import for one place)
-  return <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>;
+function Stat({ label, value, accent = "slate" }) {
+  return (
+    <span className="inline-flex items-baseline gap-1.5 rounded-md border border-slate-200 bg-white px-2 py-1">
+      <span className={`h-1.5 w-1.5 rounded-full ${COLOR_DOT[accent]}`} />
+      <span className="font-mono font-bold text-slate-800">{value}</span>
+      <span className="text-[11px]">{label}</span>
+    </span>
+  );
 }
 
-function TransitStep({ step, transit, fromNode, toNode }) {
+function SubPlanIcon() {
+  return <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" /></svg>;
+}
+
+function TransitRow({ step, transit, fromNode, toNode, gpioAtTo }) {
   const [open, setOpen] = useState(false);
-  const hasRefs = Object.keys(transit.refs || {}).length > 0;
+  const hasAssign = transit.expressionSet && transit.expressionSet.assignments.length > 0;
+  const hasGpio = gpioAtTo.length > 0;
+  const hasCond = transit.condition && transit.condition !== "无条件";
+  const expandable = hasAssign || hasGpio || hasCond;
+
   return (
-    <div className="rounded-xl border border-slate-200 bg-white">
-      <button onClick={() => setOpen(o => !o)} className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-slate-50">
-        <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 font-mono text-[11px] font-bold text-slate-600">{step}</span>
+    <div className={`rounded-xl border ${hasAssign || hasGpio ? "border-violet-200/70" : "border-slate-200"} bg-white overflow-hidden`}>
+      <button onClick={() => expandable && setOpen(o => !o)}
+        className={`flex w-full items-center gap-3 px-4 py-3 text-left ${expandable ? "hover:bg-slate-50/60" : "cursor-default"}`}>
+        <span className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-full bg-slate-100 font-mono text-[11px] font-bold text-slate-600">{step}</span>
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-sm font-bold text-slate-800">{transit.from}</span>
             {fromNode?.pt_type && <NodeTypeChip type={fromNode.pt_type} />}
-            <ArrowRight className="h-3.5 w-3.5 text-slate-400" />
-            <span className="font-mono text-sm font-bold text-slate-800">{transit.to}</span>
+            <ArrowRight className="h-4 w-4 text-violet-500" />
+            <span className="font-mono text-sm font-bold text-violet-700">{transit.to}</span>
             {toNode?.pt_type && <NodeTypeChip type={toNode.pt_type} />}
+            {toNode?.goto_target && (
+              <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0 font-mono text-[10px] font-bold text-amber-700">
+                <ArrowRight className="h-3 w-3" />{toNode.goto_target}
+              </span>
+            )}
           </div>
-          {transit.condition && (
-            <div className="mt-1.5 font-mono text-[11px] text-slate-500 break-all">
-              <span className="text-slate-400">[{transit.name}]</span> {transit.condition}
-            </div>
-          )}
+          <div className="mt-1.5 flex flex-wrap items-center gap-2">
+            {transit.condition && (
+              <span className="inline-flex items-baseline gap-1 rounded bg-slate-100 px-2 py-0.5 font-mono text-[11px] text-slate-700">
+                <span className="text-slate-400">条件</span>
+                <span className="break-all">{transit.condition}</span>
+              </span>
+            )}
+            {hasAssign && (
+              <span className="inline-flex items-center gap-1 rounded bg-violet-50 px-2 py-0.5 font-mono text-[10px] font-bold text-violet-700">
+                ✎ {transit.expressionSet.assignments.length} 项赋值
+              </span>
+            )}
+            {hasGpio && (
+              <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-700">
+                ⚡ {gpioAtTo.length} GPIO 指令
+              </span>
+            )}
+            {transit.name && <span className="font-mono text-[10px] text-slate-400">{transit.name}</span>}
+          </div>
         </div>
-        {hasRefs && (open ? <ChevronDown className="h-4 w-4 text-slate-400" /> : <ChevronRight className="h-4 w-4 text-slate-400" />)}
+        {expandable && (open ? <ChevronDown className="h-4 w-4 text-slate-400" /> : <ChevronRight className="h-4 w-4 text-slate-400" />)}
       </button>
-      {open && hasRefs && (
-        <div className="border-t border-slate-100 px-4 py-3">
-          <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">条件中引用</div>
-          <RefsBlock refs={transit.refs} />
+
+      {open && (
+        <div className="space-y-3 border-t border-slate-100 bg-slate-50/40 px-4 py-3">
+          {hasCond && (
+            <DetailSection title="触发条件" tone="slate">
+              <code className="block whitespace-pre-wrap break-all rounded bg-white px-3 py-2 font-mono text-[12px] text-slate-700">{transit.condition}</code>
+            </DetailSection>
+          )}
+          {hasAssign && (
+            <DetailSection title="变量赋值（边操作）" tone="violet">
+              <AssignmentList assignments={transit.expressionSet.assignments} />
+            </DetailSection>
+          )}
+          {hasGpio && (
+            <DetailSection title={`目标节点 ${transit.to} 的 GPIO 指令`} tone="amber">
+              {gpioAtTo.map((g, i) => <GpioBlock key={i} cmd={g} />)}
+            </DetailSection>
+          )}
         </div>
       )}
     </div>
   );
 }
 
-function NodeDetail({ node, outgoing }) {
+function NodeCard({ node, gpioCmds }) {
   const [open, setOpen] = useState(false);
   const refsByCategory = node.refs || {};
   const totalRefs = Object.values(refsByCategory).reduce((a, b) => a + b.length, 0);
+  const hasAssignments = node.assignments && node.assignments.length > 0;
+  const hasGpio = gpioCmds.length > 0;
+  const expandable = totalRefs > 0 || hasAssignments || hasGpio;
+
   return (
-    <div className="rounded-xl border border-slate-200 bg-white">
-      <button onClick={() => setOpen(o => !o)} className="flex w-full items-center gap-3 px-4 py-3 text-left hover:bg-slate-50">
+    <div className="rounded-xl border border-slate-200 bg-white overflow-hidden">
+      <button onClick={() => expandable && setOpen(o => !o)}
+        className={`flex w-full items-center gap-3 px-4 py-3 text-left ${expandable ? "hover:bg-slate-50/60" : "cursor-default"}`}>
         <NodeTypeChip type={node.pt_type} />
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-mono text-sm font-bold text-slate-800">{node.node_name}</span>
-            {node.pt_name && node.pt_name !== node.node_name && <span className="font-mono text-[11px] text-slate-400">"{node.pt_name}"</span>}
+            {node.pt_name && node.pt_name !== node.node_name && (
+              <span className="font-mono text-[11px] text-slate-400">"{node.pt_name}"</span>
+            )}
             {node.goto_target && (
               <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-2 py-0.5 font-mono text-[10px] font-bold text-amber-700">
                 <ArrowRight className="h-3 w-3" /> {node.goto_target}
               </span>
             )}
+            {node.tool_name && (
+              <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-[10px] text-slate-600">tool: {node.tool_name}</span>
+            )}
           </div>
           <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
+            {hasAssignments && (
+              <span className="inline-flex items-center gap-1 rounded bg-violet-50 px-1.5 py-0 font-mono text-[10px] font-bold text-violet-700">
+                ✎ {node.assignments.length} 项参数
+              </span>
+            )}
+            {hasGpio && (
+              <span className="inline-flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0 font-mono text-[10px] font-bold text-amber-700">
+                ⚡ {gpioCmds.length} GPIO
+              </span>
+            )}
             {totalRefs > 0 && <span>引用 {totalRefs} 项</span>}
-            {outgoing.length > 0 && <span>· 出向 {outgoing.length} 条</span>}
-            {/* mini category chips */}
             {Object.entries(refsByCategory).map(([cat, items]) => {
               const meta = CATEGORY_META[cat];
-              if (!meta || items.length === 0) return null;
+              if (!meta || !items.length) return null;
               return (
                 <span key={cat} className={`inline-flex items-center gap-1 rounded border px-1.5 py-0 font-mono text-[10px] ${COLOR_CHIP[meta.color]}`}>
                   <span className={`h-1 w-1 rounded-full ${COLOR_DOT[meta.color]}`} />
@@ -795,27 +1013,90 @@ function NodeDetail({ node, outgoing }) {
             })}
           </div>
         </div>
-        {totalRefs > 0 && (open ? <ChevronDown className="h-4 w-4 text-slate-400" /> : <ChevronRight className="h-4 w-4 text-slate-400" />)}
+        {expandable && (open ? <ChevronDown className="h-4 w-4 text-slate-400" /> : <ChevronRight className="h-4 w-4 text-slate-400" />)}
       </button>
-      {open && (
-        <div className="space-y-3 border-t border-slate-100 px-4 py-3">
-          {totalRefs > 0 ? <RefsBlock refs={refsByCategory} /> : <div className="text-xs text-slate-400">此节点无外部引用</div>}
-          {outgoing.length > 0 && (
-            <div>
-              <div className="mb-1.5 text-[10px] font-bold uppercase tracking-wider text-slate-500">出向跳转</div>
-              <div className="space-y-1">
-                {outgoing.map((t, i) => (
-                  <div key={i} className="flex items-baseline gap-2 font-mono text-[11px]">
-                    <ArrowRight className="h-3 w-3 flex-shrink-0 text-slate-400" />
-                    <span className="font-bold text-slate-800">{t.to}</span>
-                    {t.condition && <span className="text-slate-500">[{t.condition}]</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
+
+      {open && expandable && (
+        <div className="space-y-3 border-t border-slate-100 bg-slate-50/40 px-4 py-3">
+          {hasAssignments && (
+            <DetailSection title="节点参数赋值" tone="violet">
+              <AssignmentList assignments={node.assignments} />
+            </DetailSection>
+          )}
+          {hasGpio && (
+            <DetailSection title="GPIO 信号输出" tone="amber">
+              {gpioCmds.map((g, i) => <GpioBlock key={i} cmd={g} />)}
+            </DetailSection>
+          )}
+          {totalRefs > 0 && (
+            <DetailSection title="引用变量" tone="slate">
+              <RefsBlock refs={refsByCategory} />
+            </DetailSection>
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function DetailSection({ title, tone, children }) {
+  const tones = {
+    violet: "border-violet-200 bg-violet-50/40",
+    amber:  "border-amber-200 bg-amber-50/40",
+    slate:  "border-slate-200 bg-white",
+  };
+  return (
+    <div className={`rounded-lg border ${tones[tone] || tones.slate} p-3`}>
+      <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">{title}</div>
+      <div className="space-y-1.5">{children}</div>
+    </div>
+  );
+}
+
+function ParamPill({ param }) {
+  if (!param) return <span className="font-mono text-xs text-slate-400">?</span>;
+  const meta = CATEGORY_META[param.category];
+  const color = meta?.color || "slate";
+  const isConst = param.category === "CONST";
+  return (
+    <span className={`inline-flex items-baseline gap-1 rounded-md border px-1.5 py-0.5 font-mono text-[11px] ${isConst ? "border-slate-200 bg-white text-slate-700" : COLOR_CHIP[color]}`}>
+      {!isConst && param.module_name && param.module_name !== "rootNode" && (
+        <span className="opacity-60">{param.module_name}.</span>
+      )}
+      <span>{param.text || param.name || param.data || "?"}</span>
+      {param.type && <span className="rounded bg-white/60 px-1 text-[9px] text-slate-500">{param.type}</span>}
+    </span>
+  );
+}
+
+function AssignmentList({ assignments }) {
+  return (
+    <div className="space-y-1.5">
+      {assignments.map((a, i) => (
+        <div key={i} className="flex flex-wrap items-center gap-2 font-mono text-[12px]">
+          <ParamPill param={a.lhs} />
+          <span className="font-bold text-violet-600">←</span>
+          <ParamPill param={a.rhs} />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function GpioBlock({ cmd }) {
+  return (
+    <div className="rounded-md border border-amber-200/60 bg-white p-2">
+      <div className="mb-1.5 flex flex-wrap items-baseline gap-2 text-[11px]">
+        <span className="rounded bg-amber-100 px-1.5 py-0.5 font-mono text-[10px] font-bold text-amber-800">{cmd.device}</span>
+        {cmd.one_time_only && <span className="rounded bg-slate-100 px-1.5 py-0 font-mono text-[10px] text-slate-600">单次触发</span>}
+        {cmd.condition && cmd.condition !== "无条件" && (
+          <span className="font-mono text-[11px] text-slate-500">
+            当 <code className="rounded bg-slate-100 px-1 text-slate-700">{cmd.condition}</code>
+          </span>
+        )}
+      </div>
+      <AssignmentList assignments={cmd.assignments} />
+      {cmd.desc && <div className="mt-1 text-[10px] text-slate-500">{cmd.desc}</div>}
     </div>
   );
 }
