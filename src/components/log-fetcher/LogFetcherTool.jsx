@@ -23,7 +23,7 @@ import {
   CornerUpLeft
 } from "lucide-react";
 
-function DeploymentGuide({ onCheck }) {
+function DeploymentGuide({ onCheck, onConfigureBackend, currentBackend }) {
   const serverJsCode = `const express = require('express');
 const cors = require('cors');
 const ftp = require('basic-ftp');
@@ -276,12 +276,20 @@ app.listen(PORT, () => {
           </div>
         </div>
 
-        <div className="mt-8 flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
-          <button 
-            onClick={onCheck} 
-            className="flex items-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white shadow-md shadow-blue-200 transition-all hover:-translate-y-0.5 hover:bg-blue-700"
+        <div className="mt-8 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
+          <div className="flex flex-col gap-1 text-xs text-slate-500">
+            <span>当前后端地址：<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700">{currentBackend || "http://localhost:3001"}</code></span>
+            {onConfigureBackend && (
+              <button onClick={onConfigureBackend} className="self-start text-blue-600 hover:underline">
+                改用其他后端地址（局域网设备 / Cloudflare Tunnel）→
+              </button>
+            )}
+          </div>
+          <button
+            onClick={onCheck}
+            className="flex items-center justify-center gap-2 rounded-xl bg-blue-600 px-6 py-3 text-sm font-bold text-white shadow-md shadow-blue-200 transition-all hover:-translate-y-0.5 hover:bg-blue-700"
           >
-            <RefreshCw size={18} /> 我已启动服务，重新检测环境
+            <RefreshCw size={18} /> 我已启动服务，重新检测
           </button>
         </div>
       </div>
@@ -289,8 +297,31 @@ app.listen(PORT, () => {
   );
 }
 
+const DEFAULT_BACKEND = "http://localhost:3001";
+const BACKEND_STORAGE_KEY = "LOG_FETCHER_BACKEND_URL";
+
+// Strip trailing slash so callers can do `${backend}/api/...`
+function normalizeBackend(url) {
+  return (url || DEFAULT_BACKEND).replace(/\/+$/, "");
+}
+
 export default function LogFetcherTool() {
+  const [backendUrl, setBackendUrl] = useState(() =>
+    normalizeBackend(localStorage.getItem(BACKEND_STORAGE_KEY) || DEFAULT_BACKEND)
+  );
   const [backendStatus, setBackendStatus] = useState("checking"); // checking, online, offline
+  const [showBackendConfig, setShowBackendConfig] = useState(false);
+  const [backendInput, setBackendInput] = useState(backendUrl);
+
+  const saveBackendUrl = (url) => {
+    const u = normalizeBackend(url);
+    setBackendUrl(u);
+    localStorage.setItem(BACKEND_STORAGE_KEY, u);
+    setShowBackendConfig(false);
+    setBackendStatus("checking");
+  };
+  const resetBackendUrl = () => saveBackendUrl(DEFAULT_BACKEND);
+
   const [config, setConfig] = useState({
     protocol: "FTP",
     host: "192.168.1.100",
@@ -379,7 +410,7 @@ export default function LogFetcherTool() {
   const checkBackend = async () => {
     setBackendStatus("checking");
     try {
-      const res = await fetch("http://localhost:3001/api/health", { timeout: 2000 });
+      const res = await fetch(`${backendUrl}/api/health`, { timeout: 2000 });
       if (res.ok) {
         setBackendStatus("online");
         appendLog("success", "本地代理服务检测成功，已连接。");
@@ -393,10 +424,9 @@ export default function LogFetcherTool() {
 
   useEffect(() => {
     checkBackend();
-    appendLog("info", "Log Fetcher 界面初始化...");
 
     const interval = setInterval(() => {
-      fetch("http://localhost:3001/api/health", { timeout: 2000 })
+      fetch(`${backendUrl}/api/health`, { timeout: 2000 })
         .then(res => {
           if (!res.ok) {
             setBackendStatus("offline");
@@ -412,12 +442,15 @@ export default function LogFetcherTool() {
     }, 3000);
 
     return () => clearInterval(interval);
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [backendUrl]);
+
+  useEffect(() => { appendLog("info", "Log Fetcher 界面初始化..."); }, []);
 
   const handleSelectFolder = async () => {
     setSelectingFolder(true);
     try {
-      const res = await fetch("http://localhost:3001/api/select-folder");
+      const res = await fetch(`${backendUrl}/api/select-folder`);
       const data = await res.json();
       if (data.success && data.path) {
         setConfig(prev => ({ ...prev, localPath: data.path }));
@@ -447,7 +480,7 @@ export default function LogFetcherTool() {
 
     try {
       const fetchConfig = { ...config, path: targetPath };
-      const res = await fetch("http://localhost:3001/api/connect", {
+      const res = await fetch(`${backendUrl}/api/connect`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(fetchConfig),
@@ -497,7 +530,7 @@ export default function LogFetcherTool() {
     setScanning(true);
     setShowIpDropdown(true);
     try {
-      const res = await fetch("http://localhost:3001/api/scan");
+      const res = await fetch(`${backendUrl}/api/scan`);
       
       // 检查返回的内容类型，防止因代理未更新导致返回HTML
       const contentType = res.headers.get("content-type");
@@ -538,7 +571,7 @@ export default function LogFetcherTool() {
     appendLog("info", `开始下载${item.type === 'folder' ? '文件夹' : '文件'}: ${item.name} ...`);
     
     try {
-      const res = await fetch("http://localhost:3001/api/download", {
+      const res = await fetch(`${backendUrl}/api/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -577,7 +610,20 @@ export default function LogFetcherTool() {
   }
 
   if (backendStatus === "offline") {
-    return <DeploymentGuide onCheck={checkBackend} />;
+    return (
+      <>
+        <DeploymentGuide onCheck={checkBackend} onConfigureBackend={() => { setBackendInput(backendUrl); setShowBackendConfig(true); }} currentBackend={backendUrl} />
+        {showBackendConfig && (
+          <BackendConfigModal
+            value={backendInput}
+            onChange={setBackendInput}
+            onSave={() => saveBackendUrl(backendInput)}
+            onReset={resetBackendUrl}
+            onClose={() => setShowBackendConfig(false)}
+          />
+        )}
+      </>
+    );
   }
 
   return (
@@ -594,9 +640,14 @@ export default function LogFetcherTool() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <div className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 shadow-sm">
+            <button
+              onClick={() => { setBackendInput(backendUrl); setShowBackendConfig(true); }}
+              className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
+              title={`点击切换后端地址（当前：${backendUrl}）`}
+            >
               <CheckCircle2 size={14} /> 代理服务已就绪
-            </div>
+              <span className="ml-1 max-w-[180px] truncate font-mono text-[10px] font-normal text-emerald-600/80">{backendUrl.replace(/^https?:\/\//, "")}</span>
+            </button>
             <div className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold ${
               status === "connected" ? "bg-blue-50 text-blue-600" :
               status === "connecting" ? "bg-amber-50 text-amber-600" :
@@ -992,6 +1043,94 @@ export default function LogFetcherTool() {
                 </div>
               ))}
             </div>
+          </div>
+        </div>
+      </div>
+
+      {showBackendConfig && (
+        <BackendConfigModal
+          value={backendInput}
+          onChange={setBackendInput}
+          onSave={() => saveBackendUrl(backendInput)}
+          onReset={resetBackendUrl}
+          onClose={() => setShowBackendConfig(false)}
+        />
+      )}
+    </div>
+  );
+}
+
+function BackendConfigModal({ value, onChange, onSave, onReset, onClose }) {
+  const presets = [
+    { label: "本机服务", url: "http://localhost:3001" },
+    { label: "局域网设备示例", url: "http://192.168.1.100:3001" },
+    { label: "Cloudflare Tunnel 示例", url: "https://logserver.your-tunnel.com" },
+  ];
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
+        <div className="mb-4 flex items-start justify-between gap-4">
+          <div>
+            <h3 className="text-base font-bold text-slate-800">配置后端地址</h3>
+            <p className="mt-1 text-xs text-slate-500">指定 server.js 代理服务运行的位置</p>
+          </div>
+          <button onClick={onClose} className="rounded-full bg-slate-100 p-1.5 text-slate-400 hover:text-slate-600">
+            <X size={16} />
+          </button>
+        </div>
+
+        <label className="block text-xs font-bold text-slate-600 mb-1">后端 URL</label>
+        <input
+          type="text"
+          value={value}
+          onChange={e => onChange(e.target.value)}
+          onKeyDown={e => e.key === "Enter" && onSave()}
+          className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm outline-none focus:border-blue-400 focus:bg-white"
+        />
+
+        <div className="mt-3 space-y-1.5">
+          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">快速填入</div>
+          {presets.map(p => (
+            <button
+              key={p.url}
+              onClick={() => onChange(p.url)}
+              className="flex w-full items-center justify-between rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2 text-left text-xs transition-all hover:border-blue-300 hover:bg-blue-50/60"
+            >
+              <span className="font-bold text-slate-700">{p.label}</span>
+              <span className="font-mono text-[11px] text-slate-500">{p.url}</span>
+            </button>
+          ))}
+        </div>
+
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2.5 text-[11px] leading-5 text-amber-800">
+          <strong>⚠ 浏览器限制：</strong>
+          <br />· 当前页面是 HTTPS → 后端必须是 <strong>HTTPS</strong> 或 <strong>localhost</strong>，否则浏览器会拦截。
+          <br />· 想让局域网共享某台机器的后端，推荐用 <strong>Cloudflare Tunnel</strong> 把它暴露为 HTTPS（见下方说明）。
+        </div>
+
+        <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/40 px-3 py-2.5 text-[11px] leading-5 text-slate-700">
+          <strong className="text-blue-700">Cloudflare Tunnel 5 步快速配置：</strong>
+          <ol className="ml-4 mt-1 list-decimal space-y-0.5">
+            <li>在那台运行 server.js 的设备上：<code className="rounded bg-slate-100 px-1">winget install --id Cloudflare.cloudflared</code></li>
+            <li><code className="rounded bg-slate-100 px-1">cloudflared tunnel login</code>（浏览器选你的域名）</li>
+            <li><code className="rounded bg-slate-100 px-1">cloudflared tunnel create log-fetcher</code></li>
+            <li><code className="rounded bg-slate-100 px-1">cloudflared tunnel route dns log-fetcher logserver.yourdomain.com</code></li>
+            <li><code className="rounded bg-slate-100 px-1">cloudflared tunnel run --url http://localhost:3001 log-fetcher</code></li>
+          </ol>
+          <div className="mt-1">然后把上面输入框填成 <code className="rounded bg-slate-100 px-1">https://logserver.yourdomain.com</code></div>
+        </div>
+
+        <div className="mt-5 flex items-center justify-between gap-2">
+          <button onClick={onReset} className="text-xs font-bold text-slate-500 hover:text-slate-800">
+            重置为 localhost
+          </button>
+          <div className="flex gap-2">
+            <button onClick={onClose} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50">
+              取消
+            </button>
+            <button onClick={onSave} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-blue-700">
+              保存
+            </button>
           </div>
         </div>
       </div>
