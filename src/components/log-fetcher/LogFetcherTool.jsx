@@ -298,39 +298,113 @@ app.listen(PORT, () => {
 }
 
 const DEFAULT_BACKEND = "http://localhost:3001";
-const BACKEND_STORAGE_KEY = "LOG_FETCHER_BACKEND_URL";
+const CONTROLLERS_STORAGE_KEY = "LOG_FETCHER_CONTROLLERS";
+const LEGACY_BACKEND_KEY = "LOG_FETCHER_BACKEND_URL";
 
-// Strip trailing slash so callers can do `${backend}/api/...`
 function normalizeBackend(url) {
   return (url || DEFAULT_BACKEND).replace(/\/+$/, "");
 }
 
-export default function LogFetcherTool() {
-  const [backendUrl, setBackendUrl] = useState(() =>
-    normalizeBackend(localStorage.getItem(BACKEND_STORAGE_KEY) || DEFAULT_BACKEND)
-  );
-  const [backendStatus, setBackendStatus] = useState("checking"); // checking, online, offline
-  const [showBackendConfig, setShowBackendConfig] = useState(false);
-  const [backendInput, setBackendInput] = useState(backendUrl);
+function uid() {
+  return Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+}
 
-  const saveBackendUrl = (url) => {
-    const u = normalizeBackend(url);
-    setBackendUrl(u);
-    localStorage.setItem(BACKEND_STORAGE_KEY, u);
-    setShowBackendConfig(false);
+function loadControllers() {
+  try {
+    const raw = localStorage.getItem(CONTROLLERS_STORAGE_KEY);
+    if (raw) {
+      const p = JSON.parse(raw);
+      if (Array.isArray(p?.controllers) && p.controllers.length) return p;
+    }
+  } catch {}
+  // Migration from legacy single-backend storage
+  const legacy = localStorage.getItem(LEGACY_BACKEND_KEY);
+  const initialUrl = normalizeBackend(legacy || DEFAULT_BACKEND);
+  const id = uid();
+  return {
+    controllers: [{ id, name: "本机", url: initialUrl, lastConfig: null }],
+    activeId: id,
+  };
+}
+
+export default function LogFetcherTool() {
+  const [store, setStore] = useState(() => loadControllers());
+  const activeController = store.controllers.find(c => c.id === store.activeId) || store.controllers[0];
+  const backendUrl = normalizeBackend(activeController?.url || DEFAULT_BACKEND);
+
+  const [backendStatus, setBackendStatus] = useState("checking"); // checking, online, offline
+  const [showManager, setShowManager] = useState(false);
+
+  const persistStore = (next) => {
+    setStore(next);
+    localStorage.setItem(CONTROLLERS_STORAGE_KEY, JSON.stringify(next));
+  };
+
+  const setActiveController = (id) => {
+    if (id === store.activeId) return;
+    persistStore({ ...store, activeId: id });
     setBackendStatus("checking");
   };
-  const resetBackendUrl = () => saveBackendUrl(DEFAULT_BACKEND);
 
-  const [config, setConfig] = useState({
+  const addController = (name, url) => {
+    const id = uid();
+    const next = {
+      controllers: [...store.controllers, { id, name: name || `工控机 ${store.controllers.length + 1}`, url: normalizeBackend(url), lastConfig: null }],
+      activeId: id,
+    };
+    persistStore(next);
+    setBackendStatus("checking");
+  };
+
+  const updateController = (id, patch) => {
+    persistStore({
+      ...store,
+      controllers: store.controllers.map(c => c.id === id ? { ...c, ...patch, url: patch.url !== undefined ? normalizeBackend(patch.url) : c.url } : c),
+    });
+    if (id === store.activeId) setBackendStatus("checking");
+  };
+
+  const deleteController = (id) => {
+    if (store.controllers.length <= 1) return;          // never leave empty
+    const remaining = store.controllers.filter(c => c.id !== id);
+    persistStore({
+      controllers: remaining,
+      activeId: id === store.activeId ? remaining[0].id : store.activeId,
+    });
+    setBackendStatus("checking");
+  };
+
+  const saveActiveLastConfig = (cfg) => {
+    if (!activeController) return;
+    persistStore({
+      ...store,
+      controllers: store.controllers.map(c =>
+        c.id === activeController.id ? { ...c, lastConfig: cfg } : c
+      ),
+    });
+  };
+
+  const defaultConfig = {
     protocol: "FTP",
     host: "192.168.1.100",
     port: "21",
     username: "qnxuser",
     password: "",
     path: "/programs/log",
-    localPath: ""
-  });
+    localPath: "",
+  };
+  const [config, setConfig] = useState(activeController?.lastConfig ? { ...defaultConfig, ...activeController.lastConfig, password: "" } : defaultConfig);
+
+  // When the active controller changes, swap in its last-used connection config.
+  // Password is never persisted, so it always blanks.
+  useEffect(() => {
+    setConfig(activeController?.lastConfig
+      ? { ...defaultConfig, ...activeController.lastConfig, password: "" }
+      : defaultConfig);
+    setStatus("disconnected");
+    setFileList([]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [store.activeId]);
   
   const [status, setStatus] = useState("disconnected"); // disconnected, connecting, connected, error
   const [errorMsg, setErrorMsg] = useState("");
@@ -491,6 +565,9 @@ export default function LogFetcherTool() {
       if (data.success) {
         setStatus("connected");
         appendLog("success", `连接成功！已获取 ${data.data.length} 个文件/目录`);
+        // Persist this connection config under the active controller for next time.
+        const { password: _omit, ...persistable } = fetchConfig;
+        saveActiveLastConfig(persistable);
         
         // 处理并排序文件列表：文件夹在前，文件在后
         const processed = data.data.map(item => ({
@@ -612,14 +689,20 @@ export default function LogFetcherTool() {
   if (backendStatus === "offline") {
     return (
       <>
-        <DeploymentGuide onCheck={checkBackend} onConfigureBackend={() => { setBackendInput(backendUrl); setShowBackendConfig(true); }} currentBackend={backendUrl} />
-        {showBackendConfig && (
-          <BackendConfigModal
-            value={backendInput}
-            onChange={setBackendInput}
-            onSave={() => saveBackendUrl(backendInput)}
-            onReset={resetBackendUrl}
-            onClose={() => setShowBackendConfig(false)}
+        <DeploymentGuide
+          onCheck={checkBackend}
+          onConfigureBackend={() => setShowManager(true)}
+          currentBackend={backendUrl}
+          currentName={activeController?.name}
+        />
+        {showManager && (
+          <ControllerManager
+            store={store}
+            onActivate={setActiveController}
+            onAdd={addController}
+            onUpdate={updateController}
+            onDelete={deleteController}
+            onClose={() => setShowManager(false)}
           />
         )}
       </>
@@ -640,14 +723,12 @@ export default function LogFetcherTool() {
             </div>
           </div>
           <div className="flex items-center gap-3">
-            <button
-              onClick={() => { setBackendInput(backendUrl); setShowBackendConfig(true); }}
-              className="flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-bold text-emerald-700 shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-md"
-              title={`点击切换后端地址（当前：${backendUrl}）`}
-            >
-              <CheckCircle2 size={14} /> 代理服务已就绪
-              <span className="ml-1 max-w-[180px] truncate font-mono text-[10px] font-normal text-emerald-600/80">{backendUrl.replace(/^https?:\/\//, "")}</span>
-            </button>
+            <ControllerPicker
+              store={store}
+              backendStatus={backendStatus}
+              onActivate={setActiveController}
+              onManage={() => setShowManager(true)}
+            />
             <div className={`flex items-center gap-1.5 rounded-full px-3 py-1 text-xs font-bold ${
               status === "connected" ? "bg-blue-50 text-blue-600" :
               status === "connecting" ? "bg-amber-50 text-amber-600" :
@@ -1047,93 +1128,207 @@ export default function LogFetcherTool() {
         </div>
       </div>
 
-      {showBackendConfig && (
-        <BackendConfigModal
-          value={backendInput}
-          onChange={setBackendInput}
-          onSave={() => saveBackendUrl(backendInput)}
-          onReset={resetBackendUrl}
-          onClose={() => setShowBackendConfig(false)}
+      {showManager && (
+        <ControllerManager
+          store={store}
+          onActivate={setActiveController}
+          onAdd={addController}
+          onUpdate={updateController}
+          onDelete={deleteController}
+          onClose={() => setShowManager(false)}
         />
       )}
     </div>
   );
 }
 
-function BackendConfigModal({ value, onChange, onSave, onReset, onClose }) {
-  const presets = [
-    { label: "本机服务", url: "http://localhost:3001" },
-    { label: "局域网设备示例", url: "http://192.168.1.100:3001" },
-    { label: "Cloudflare Tunnel 示例", url: "https://logserver.your-tunnel.com" },
-  ];
+/* ============================================================
+   工控机选择器（顶部状态条）+ 工控机管理弹窗
+   ============================================================ */
+
+function ControllerPicker({ store, backendStatus, onActivate, onManage }) {
+  const active = store.controllers.find(c => c.id === store.activeId) || store.controllers[0];
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    const h = (e) => { if (open && ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    window.addEventListener("mousedown", h);
+    return () => window.removeEventListener("mousedown", h);
+  }, [open]);
+
+  const statusDot = backendStatus === "online" ? "bg-emerald-500"
+    : backendStatus === "checking" ? "animate-pulse bg-amber-400"
+    : "bg-rose-500";
+  const statusText = backendStatus === "online" ? "在线"
+    : backendStatus === "checking" ? "检测中" : "离线";
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="flex min-w-[200px] items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-left shadow-sm transition-all hover:border-emerald-300"
+      >
+        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${statusDot}`} />
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-bold text-slate-800">{active?.name || "未配置"}</div>
+          <div className="truncate font-mono text-[10px] text-slate-400">{active?.url}</div>
+        </div>
+        <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-500">{statusText}</span>
+        <svg className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute right-0 top-full z-50 mt-2 w-80 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-2xl">
+          <div className="border-b border-slate-100 bg-slate-50/80 px-3 py-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            选择工控机
+          </div>
+          <div className="max-h-72 overflow-y-auto">
+            {store.controllers.map(c => {
+              const isActive = c.id === store.activeId;
+              return (
+                <button
+                  key={c.id}
+                  onClick={() => { onActivate(c.id); setOpen(false); }}
+                  className={`flex w-full items-center gap-2 border-b border-slate-100 px-3 py-2.5 text-left last:border-b-0 transition-colors ${isActive ? "bg-emerald-50/60" : "hover:bg-slate-50"}`}
+                >
+                  <span className={`h-1.5 w-1.5 flex-shrink-0 rounded-full ${isActive ? "bg-emerald-500" : "bg-slate-300"}`} />
+                  <div className="min-w-0 flex-1">
+                    <div className={`truncate text-sm font-bold ${isActive ? "text-emerald-700" : "text-slate-700"}`}>{c.name}</div>
+                    <div className="truncate font-mono text-[10px] text-slate-500">{c.url}</div>
+                  </div>
+                  {isActive && <CheckCircle2 size={14} className="flex-shrink-0 text-emerald-500" />}
+                </button>
+              );
+            })}
+          </div>
+          <button
+            onClick={() => { setOpen(false); onManage(); }}
+            className="flex w-full items-center justify-center gap-2 border-t border-slate-200 bg-slate-50 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-100"
+          >
+            <Server size={13} /> 管理工控机…
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ControllerManager({ store, onActivate, onAdd, onUpdate, onDelete, onClose }) {
+  const [draft, setDraft] = useState({ name: "", url: "" });
+  const submit = () => {
+    if (!draft.name.trim() || !draft.url.trim()) return alert("请填写名称和后端 URL");
+    onAdd(draft.name.trim(), draft.url.trim());
+    setDraft({ name: "", url: "" });
+  };
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
-      <div className="w-full max-w-lg rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
-        <div className="mb-4 flex items-start justify-between gap-4">
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-2xl border border-slate-200 bg-white shadow-2xl">
+        <div className="flex items-start justify-between gap-4 border-b border-slate-100 p-5">
           <div>
-            <h3 className="text-base font-bold text-slate-800">配置后端地址</h3>
-            <p className="mt-1 text-xs text-slate-500">指定 server.js 代理服务运行的位置</p>
+            <h3 className="text-base font-bold text-slate-800">管理工控机</h3>
+            <p className="mt-1 text-xs text-slate-500">每台工控机部署一份 server.js，前端通过它访问机器人</p>
           </div>
           <button onClick={onClose} className="rounded-full bg-slate-100 p-1.5 text-slate-400 hover:text-slate-600">
             <X size={16} />
           </button>
         </div>
 
-        <label className="block text-xs font-bold text-slate-600 mb-1">后端 URL</label>
-        <input
-          type="text"
-          value={value}
-          onChange={e => onChange(e.target.value)}
-          onKeyDown={e => e.key === "Enter" && onSave()}
-          className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 font-mono text-sm outline-none focus:border-blue-400 focus:bg-white"
-        />
+        <div className="flex-1 overflow-y-auto px-5 py-4">
+          <div className="mb-4 text-[10px] font-bold uppercase tracking-wider text-slate-500">已配置 ({store.controllers.length})</div>
+          <div className="space-y-2">
+            {store.controllers.map(c => (
+              <ControllerRow key={c.id} c={c} active={c.id === store.activeId}
+                canDelete={store.controllers.length > 1}
+                onActivate={() => onActivate(c.id)}
+                onUpdate={(patch) => onUpdate(c.id, patch)}
+                onDelete={() => onDelete(c.id)} />
+            ))}
+          </div>
 
-        <div className="mt-3 space-y-1.5">
-          <div className="text-[10px] font-bold uppercase tracking-wider text-slate-500">快速填入</div>
-          {presets.map(p => (
-            <button
-              key={p.url}
-              onClick={() => onChange(p.url)}
-              className="flex w-full items-center justify-between rounded-lg border border-slate-200 bg-slate-50/60 px-3 py-2 text-left text-xs transition-all hover:border-blue-300 hover:bg-blue-50/60"
-            >
-              <span className="font-bold text-slate-700">{p.label}</span>
-              <span className="font-mono text-[11px] text-slate-500">{p.url}</span>
-            </button>
-          ))}
-        </div>
-
-        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2.5 text-[11px] leading-5 text-amber-800">
-          <strong>⚠ 浏览器限制：</strong>
-          <br />· 当前页面是 HTTPS → 后端必须是 <strong>HTTPS</strong> 或 <strong>localhost</strong>，否则浏览器会拦截。
-          <br />· 想让局域网共享某台机器的后端，推荐用 <strong>Cloudflare Tunnel</strong> 把它暴露为 HTTPS（见下方说明）。
-        </div>
-
-        <div className="mt-3 rounded-lg border border-blue-100 bg-blue-50/40 px-3 py-2.5 text-[11px] leading-5 text-slate-700">
-          <strong className="text-blue-700">Cloudflare Tunnel 5 步快速配置：</strong>
-          <ol className="ml-4 mt-1 list-decimal space-y-0.5">
-            <li>在那台运行 server.js 的设备上：<code className="rounded bg-slate-100 px-1">winget install --id Cloudflare.cloudflared</code></li>
-            <li><code className="rounded bg-slate-100 px-1">cloudflared tunnel login</code>（浏览器选你的域名）</li>
-            <li><code className="rounded bg-slate-100 px-1">cloudflared tunnel create log-fetcher</code></li>
-            <li><code className="rounded bg-slate-100 px-1">cloudflared tunnel route dns log-fetcher logserver.yourdomain.com</code></li>
-            <li><code className="rounded bg-slate-100 px-1">cloudflared tunnel run --url http://localhost:3001 log-fetcher</code></li>
-          </ol>
-          <div className="mt-1">然后把上面输入框填成 <code className="rounded bg-slate-100 px-1">https://logserver.yourdomain.com</code></div>
-        </div>
-
-        <div className="mt-5 flex items-center justify-between gap-2">
-          <button onClick={onReset} className="text-xs font-bold text-slate-500 hover:text-slate-800">
-            重置为 localhost
-          </button>
-          <div className="flex gap-2">
-            <button onClick={onClose} className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50">
-              取消
-            </button>
-            <button onClick={onSave} className="rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-blue-700">
-              保存
+          <div className="mt-5 rounded-xl border border-dashed border-slate-300 bg-slate-50/60 p-4">
+            <div className="mb-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">+ 添加工控机</div>
+            <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+              <input
+                placeholder="名称（如：1号工控机·焊接臂）"
+                value={draft.name}
+                onChange={e => setDraft(d => ({ ...d, name: e.target.value }))}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
+              />
+              <input
+                placeholder="后端 URL（http://localhost:3001 或 https://...）"
+                value={draft.url}
+                onChange={e => setDraft(d => ({ ...d, url: e.target.value }))}
+                onKeyDown={e => e.key === "Enter" && submit()}
+                className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm outline-none focus:border-blue-400"
+              />
+            </div>
+            <button onClick={submit} className="mt-3 rounded-lg bg-blue-600 px-4 py-2 text-sm font-bold text-white shadow-sm hover:bg-blue-700">
+              添加
             </button>
           </div>
+
+          <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50/60 px-3 py-2.5 text-[11px] leading-6 text-amber-800">
+            <strong>⚠ 浏览器限制：</strong>
+            前端部署在 Cloudflare Pages (HTTPS) 时，<strong>无法直接访问 http:// 后端</strong>（除 localhost 外）。<br />
+            两种解法：
+            <ol className="ml-4 mt-1 list-decimal space-y-0.5">
+              <li>每台工控机用 <strong>Cloudflare Tunnel</strong> 暴露为 HTTPS（在工控机上 <code className="rounded bg-white/60 px-1">cloudflared tunnel --url http://localhost:3001</code>，拿到 <code className="rounded bg-white/60 px-1">https://xxx.trycloudflare.com</code>，填到 URL 字段）</li>
+              <li>用户在本机以 HTTP 启动前端（<code className="rounded bg-white/60 px-1">npx serve dist</code>），就可以填工控机的 http://10.x.x.x:3001 而不受限</li>
+            </ol>
+          </div>
+        </div>
+
+        <div className="border-t border-slate-100 bg-slate-50 px-5 py-3 text-right">
+          <button onClick={onClose} className="rounded-lg bg-slate-800 px-5 py-2 text-sm font-bold text-white hover:bg-slate-700">
+            完成
+          </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function ControllerRow({ c, active, canDelete, onActivate, onUpdate, onDelete }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState({ name: c.name, url: c.url });
+  useEffect(() => { setDraft({ name: c.name, url: c.url }); }, [c.name, c.url]);
+
+  if (editing) {
+    return (
+      <div className="rounded-xl border border-blue-300 bg-blue-50/40 p-3">
+        <div className="grid grid-cols-1 gap-2 md:grid-cols-2">
+          <input value={draft.name} onChange={e => setDraft(d => ({ ...d, name: e.target.value }))}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400" />
+          <input value={draft.url} onChange={e => setDraft(d => ({ ...d, url: e.target.value }))}
+            className="rounded-lg border border-slate-200 bg-white px-3 py-2 font-mono text-sm outline-none focus:border-blue-400" />
+        </div>
+        <div className="mt-2 flex justify-end gap-2">
+          <button onClick={() => setEditing(false)} className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-50">取消</button>
+          <button onClick={() => { onUpdate({ name: draft.name.trim() || c.name, url: draft.url.trim() || c.url }); setEditing(false); }}
+            className="rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-bold text-white hover:bg-blue-700">保存</button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={`flex items-center gap-3 rounded-xl border px-3 py-2.5 transition-colors ${active ? "border-emerald-300 bg-emerald-50/40" : "border-slate-200 bg-white hover:border-slate-300"}`}>
+      <button onClick={onActivate} className="flex min-w-0 flex-1 items-center gap-2 text-left">
+        <span className={`h-2 w-2 flex-shrink-0 rounded-full ${active ? "bg-emerald-500" : "bg-slate-300"}`} />
+        <div className="min-w-0">
+          <div className={`truncate text-sm font-bold ${active ? "text-emerald-700" : "text-slate-700"}`}>{c.name}</div>
+          <div className="truncate font-mono text-[11px] text-slate-500">{c.url}</div>
+        </div>
+        {active && <span className="ml-1 rounded bg-emerald-100 px-1.5 py-0 text-[10px] font-bold text-emerald-700">当前</span>}
+      </button>
+      <button onClick={() => setEditing(true)} className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-[11px] font-bold text-slate-600 hover:bg-slate-50">编辑</button>
+      <button onClick={onDelete} disabled={!canDelete}
+        className={`rounded-lg border px-2 py-1 text-[11px] font-bold ${canDelete ? "border-red-200 bg-white text-red-500 hover:bg-red-50" : "border-slate-100 text-slate-300 cursor-not-allowed"}`}>
+        删除
+      </button>
     </div>
   );
 }
