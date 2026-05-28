@@ -24,32 +24,37 @@ import {
 } from "lucide-react";
 
 function DeploymentGuide({ onCheck, onConfigureBackend, currentBackend }) {
-  const serverJsCode = `const express = require('express');
+  const serverJsCode = `// Log Fetcher Proxy - v1.5.0
+// Streams FTP files straight back to the browser (no server-side localPath).
+const express = require('express');
 const cors = require('cors');
 const ftp = require('basic-ftp');
-const fs = require('fs');
-const path = require('path');
+const { Writable } = require('stream');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = 3001;
+// Default port 3101. Override via env var:  PORT=4101 node server.js
+// (Avoid 3001 — commonly occupied by other services on robot IPCs.)
+const PORT = parseInt(process.env.PORT, 10) || 3101;
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', message: 'Log Fetcher Proxy is running', version: '1.3.2' });
+  res.json({ status: 'ok', message: 'Log Fetcher Proxy is running', version: '1.5.0' });
 });
 
+// LAN IP scan — works on Linux (arp/ip neigh), Windows (arp -a) and macOS (arp -a).
 app.get('/api/scan', (req, res) => {
   const { exec } = require('child_process');
-  exec('arp -a', (err, stdout) => {
+  const cmd = process.platform === 'win32' ? 'arp -a' : (process.platform === 'darwin' ? 'arp -an' : 'ip neigh');
+  exec(cmd, (err, stdout) => {
     if (err) return res.status(500).json({ success: false, error: err.message });
+    const ipRe = /(\\d{1,3}\\.\\d{1,3}\\.\\d{1,3}\\.\\d{1,3})/g;
     const ips = new Set();
-    const regex = /([0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+)/g;
-    let match;
-    while ((match = regex.exec(stdout)) !== null) {
-      const ip = match[1];
-      if (!ip.startsWith('224.') && !ip.startsWith('239.') && !ip.startsWith('255.') && !ip.endsWith('.255') && ip !== '127.0.0.1') {
+    let m;
+    while ((m = ipRe.exec(stdout)) !== null) {
+      const ip = m[1];
+      if (!ip.startsWith('224.') && !ip.startsWith('239.') && !ip.startsWith('255.') && !ip.endsWith('.255') && ip !== '127.0.0.1' && ip !== '0.0.0.0') {
         ips.add(ip);
       }
     }
@@ -57,161 +62,76 @@ app.get('/api/scan', (req, res) => {
   });
 });
 
-app.get('/api/select-folder', (req, res) => {
-  const { execFile } = require('child_process');
-  const platform = process.platform;
-  if (platform === 'win32') {
-    const psScript = \`
-      Add-Type -AssemblyName System.windows.forms
-      \\$owner = New-Object System.Windows.Forms.Form
-      \\$owner.TopMost = \\$true
-      \\$owner.Opacity = 0
-      \\$owner.ShowInTaskbar = \\$false
-      \\$owner.WindowState = [System.Windows.Forms.FormWindowState]::Minimized
-      \\$owner.Show()
-      \\$owner.WindowState = [System.Windows.Forms.FormWindowState]::Normal
-      \\$owner.Activate()
-      \\$owner.BringToFront()
-      \\$f = New-Object System.Windows.Forms.OpenFileDialog
-      \\$f.Title = "请选择本地保存路径 (进入目标文件夹后点击打开)"
-      \\$f.ValidateNames = \\$false
-      \\$f.CheckFileExists = \\$false
-      \\$f.CheckPathExists = \\$true
-      \\$f.FileName = "选择此文件夹"
-      if (\\$f.ShowDialog(\\$owner) -eq [System.Windows.Forms.DialogResult]::OK) {
-          Write-Output ([System.IO.Path]::GetDirectoryName(\\$f.FileName))
-      }
-      \\$owner.Close()
-    \`;
-    const b64 = Buffer.from(psScript, 'utf16le').toString('base64');
-    execFile('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', b64], (error, stdout) => {
-      const selectedPath = (stdout || '').trim();
-      if (selectedPath) {
-        res.json({ success: true, path: selectedPath });
-      } else if (error) {
-        res.status(500).json({ success: false, error: error.message });
-      } else {
-        res.json({ success: false, error: '未选择路径或发生错误' });
-      }
-    });
-    return;
-  }
-
-  if (platform === 'darwin') {
-    execFile(
-      'osascript',
-      [
-        '-e',
-        'tell application \"Finder\" to activate',
-        '-e',
-        'POSIX path of (choose folder with prompt \"请选择本地保存路径\")'
-      ],
-      (error, stdout) => {
-        const selectedPath = (stdout || '').trim().replace(/\\/$/, '');
-        if (selectedPath) {
-          res.json({ success: true, path: selectedPath });
-        } else if (error) {
-          res.status(500).json({ success: false, error: error.message });
-        } else {
-          res.json({ success: false, error: '未选择路径或发生错误' });
-        }
-      }
-    );
-    return;
-  }
-
-  res.status(400).json({ success: false, error: '当前系统暂不支持文件夹选择窗口，请手动输入本地保存路径。' });
-});
-
 app.post('/api/connect', async (req, res) => {
   const { protocol, host, port, username, password, path: remotePath } = req.body;
-  if (protocol === 'FTP') {
-    const client = new ftp.Client();
-    client.ftp.verbose = false;
-    try {
-      await client.access({
-        host,
-        port: parseInt(port) || 21,
-        user: username,
-        password,
-        secure: false
-      });
-      await client.cd(remotePath || '/');
-      const list = await client.list();
-      const files = list.map(item => ({
-        name: item.name,
-        size: item.size,
-        date: item.rawModifiedAt || item.modifiedAt || '未知时间',
-        type: item.isDirectory ? 'folder' : 'file'
-      }));
-      res.json({ success: true, data: files });
-    } catch (err) {
-      let errorMsg = err.message;
-      if (err.code === 'ECONNREFUSED' || errorMsg.includes('ECONNREFUSED')) {
-        errorMsg = \`目标设备拒绝连接 (\${host}:\${port})，请检查IP地址和端口是否正确，以及设备是否开启了FTP服务。\`;
-      } else if (err.code === 'ETIMEDOUT' || errorMsg.includes('Timeout')) {
-        errorMsg = \`连接目标设备 (\${host}:\${port}) 超时，请检查设备是否在线且处于同一局域网。\`;
-      }
-      if (!res.headersSent) res.status(500).json({ success: false, error: errorMsg });
-    } finally {
-      client.close();
+  if (protocol !== 'FTP') {
+    return res.status(500).json({ success: false, error: \`代理服务暂未完全实现 [\${protocol}] 协议，请使用 FTP\` });
+  }
+  const client = new ftp.Client();
+  client.ftp.verbose = false;
+  try {
+    await client.access({ host, port: parseInt(port) || 21, user: username, password, secure: false });
+    await client.cd(remotePath || '/');
+    const list = await client.list();
+    const files = list.map(item => ({
+      name: item.name,
+      size: item.size,
+      date: item.rawModifiedAt || item.modifiedAt || '未知时间',
+      type: item.isDirectory ? 'folder' : 'file',
+    }));
+    res.json({ success: true, data: files });
+  } catch (err) {
+    let msg = err.message;
+    if (err.code === 'ECONNREFUSED' || msg.includes('ECONNREFUSED')) {
+      msg = \`目标设备拒绝连接 (\${host}:\${port})，请检查 IP/端口/FTP 服务\`;
+    } else if (err.code === 'ETIMEDOUT' || msg.includes('Timeout')) {
+      msg = \`连接 (\${host}:\${port}) 超时，请检查设备是否在线\`;
     }
-  } else {
-    res.status(500).json({ success: false, error: \`代理服务暂未完全实现 [\${protocol}] 协议，请使用 FTP 协议抓取。\` });
+    if (!res.headersSent) res.status(500).json({ success: false, error: msg });
+  } finally {
+    client.close();
   }
 });
 
+// Stream a single file from FTP back through HTTP — browser saves it directly.
 app.post('/api/download', async (req, res) => {
-  const { protocol, host, port, username, password, path: remotePath, localPath, fileName, type } = req.body;
-  if (protocol === 'FTP') {
-    const client = new ftp.Client();
-    client.ftp.verbose = false;
-    try {
-      await client.access({
-        host,
-        port: parseInt(port) || 21,
-        user: username,
-        password,
-        secure: false
-      });
-      await client.cd(remotePath || '/');
-      
-      const resolvedLocalPath = path.resolve(localPath);
-      if (!fs.existsSync(resolvedLocalPath)) {
-        return res.status(400).json({ success: false, error: \`指定的本地保存路径不存在：\${resolvedLocalPath}\` });
-      }
-      
-      const stats = fs.statSync(resolvedLocalPath);
-      if (!stats.isDirectory()) {
-        return res.status(400).json({ success: false, error: \`指定的本地保存路径不是一个有效的目录：\${resolvedLocalPath}\` });
-      }
-      
-      const localFilePath = path.join(resolvedLocalPath, fileName);
-      if (type === 'folder') {
-        if (!fs.existsSync(localFilePath)) {
-          fs.mkdirSync(localFilePath, { recursive: true });
-        }
-        await client.downloadToDir(localFilePath, fileName);
-      } else {
-        await client.downloadTo(localFilePath, fileName);
-      }
-      
-      res.json({ success: true, localFilePath });
-    } catch (err) {
+  const { protocol, host, port, username, password, path: remotePath, fileName, type } = req.body;
+  if (type === 'folder') {
+    return res.status(400).json({ success: false, error: '当前版本仅支持单文件下载到浏览器。如需文件夹请逐个下载或先压缩。' });
+  }
+  if (protocol !== 'FTP') {
+    return res.status(500).json({ success: false, error: '暂仅支持 FTP 协议下载' });
+  }
+  const client = new ftp.Client();
+  client.ftp.verbose = false;
+  try {
+    await client.access({ host, port: parseInt(port) || 21, user: username, password, secure: false });
+    await client.cd(remotePath || '/');
+
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('Content-Disposition', \`attachment; filename*=UTF-8''\${encodeURIComponent(fileName)}\`);
+    res.setHeader('Cache-Control', 'no-store');
+
+    // basic-ftp accepts any Writable as destination. res is one.
+    await client.downloadTo(res, fileName);
+  } catch (err) {
+    if (!res.headersSent) {
       res.status(500).json({ success: false, error: err.message });
-    } finally {
-      client.close();
+    } else {
+      // Already streaming — abort the response
+      res.destroy(err);
     }
-  } else {
-    res.status(500).json({ success: false, error: '暂仅支持 FTP 协议下载' });
+  } finally {
+    client.close();
   }
 });
 
 app.listen(PORT, () => {
   console.log('=========================================');
-  console.log('🚀 Log Fetcher 代理服务已启动!');
+  console.log('🚀 Log Fetcher 代理服务已启动 (v1.5.0)');
   console.log(\`📡 监听端口: http://localhost:\${PORT}\`);
-  console.log('✅ 现在您可以返回浏览器继续抓取日志了');
+  console.log('💡 提示: 通过环境变量 PORT 可修改监听端口');
+  console.log('   例如: PORT=3101 node server.js');
   console.log('=========================================');
 });`;
 
@@ -268,7 +188,7 @@ app.listen(PORT, () => {
                   <div className="flex">
                     <span className="mr-3 select-none text-emerald-400">$</span>
                     <span>node server.js</span>
-                    <span className="ml-4 select-none text-slate-500"># 启动服务 (监听 3001 端口)</span>
+                    <span className="ml-4 select-none text-slate-500"># 启动服务 (监听 3101 端口)</span>
                   </div>
                 </div>
               </div>
@@ -278,7 +198,7 @@ app.listen(PORT, () => {
 
         <div className="mt-8 flex flex-col gap-3 border-t border-slate-100 pt-4 sm:flex-row sm:items-center sm:justify-between">
           <div className="flex flex-col gap-1 text-xs text-slate-500">
-            <span>当前后端地址：<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700">{currentBackend || "http://localhost:3001"}</code></span>
+            <span>当前后端地址：<code className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-slate-700">{currentBackend || "http://localhost:3101"}</code></span>
             {onConfigureBackend && (
               <button onClick={onConfigureBackend} className="self-start text-blue-600 hover:underline">
                 改用其他后端地址（局域网设备 / Cloudflare Tunnel）→
@@ -297,7 +217,7 @@ app.listen(PORT, () => {
   );
 }
 
-const DEFAULT_BACKEND = "http://localhost:3001";
+const DEFAULT_BACKEND = "http://localhost:3101";
 const CONTROLLERS_STORAGE_KEY = "LOG_FETCHER_CONTROLLERS";
 const LEGACY_BACKEND_KEY = "LOG_FETCHER_BACKEND_URL";
 
@@ -410,7 +330,6 @@ export default function LogFetcherTool() {
   const [errorMsg, setErrorMsg] = useState("");
   const [fileList, setFileList] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [selectingFolder, setSelectingFolder] = useState(false);
   const [terminalLogs, setTerminalLogs] = useState([]);
 
   const abortControllerRef = useRef(null);
@@ -521,21 +440,6 @@ export default function LogFetcherTool() {
 
   useEffect(() => { appendLog("info", "Log Fetcher 界面初始化..."); }, []);
 
-  const handleSelectFolder = async () => {
-    setSelectingFolder(true);
-    try {
-      const res = await fetch(`${backendUrl}/api/select-folder`);
-      const data = await res.json();
-      if (data.success && data.path) {
-        setConfig(prev => ({ ...prev, localPath: data.path }));
-        appendLog("success", `已选择本地保存路径: ${data.path}`);
-      }
-    } catch (err) {
-      appendLog("error", "无法打开文件夹选择窗口，请确保已更新并运行最新版的 server.js");
-    } finally {
-      setSelectingFolder(false);
-    }
-  };
 
   const handleConnect = async (eOrPath) => {
     let targetPath = config.path;
@@ -639,30 +543,36 @@ export default function LogFetcherTool() {
 
   const handleDownload = async (item, e) => {
     e.stopPropagation();
-    if (!config.localPath) {
-      alert("请先选择或输入本地保存路径");
-      setErrorMsg("请先在左侧配置【本地保存路径】");
-      appendLog("error", "未配置本地保存路径，无法下载。");
+    if (item.type === "folder") {
+      alert("当前仅支持单文件下载到浏览器。如需整个文件夹，请逐个文件下载或将其打包后下载。");
       return;
     }
-    appendLog("info", `开始下载${item.type === 'folder' ? '文件夹' : '文件'}: ${item.name} ...`);
-    
+    appendLog("info", `开始下载文件: ${item.name} ...`);
+
     try {
+      // Stream the file from server straight into the browser — no local path
+      // needed on the server side.
       const res = await fetch(`${backendUrl}/api/download`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...config,
-          fileName: item.name,
-          type: item.type
-        })
+        body: JSON.stringify({ ...config, fileName: item.name, type: item.type }),
       });
-      const data = await res.json();
-      if (data.success) {
-        appendLog("success", `下载成功: ${file.name} 已保存至 ${data.localFilePath}`);
-      } else {
-        appendLog("error", `下载失败: ${data.error}`);
+      if (!res.ok) {
+        let msg = `HTTP ${res.status}`;
+        try { const j = await res.json(); msg = j.error || msg; } catch {}
+        appendLog("error", `下载失败: ${msg}`);
+        return;
       }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = item.name;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      appendLog("success", `已下载到浏览器默认下载文件夹: ${item.name}`);
     } catch (err) {
       appendLog("error", `网络请求错误: ${err.message}`);
     }
@@ -892,28 +802,9 @@ export default function LogFetcherTool() {
                 />
               </div>
 
-              <div>
-                <label className="mb-1.5 flex items-center gap-1 text-xs font-bold text-slate-600">
-                  <Download size={12} /> 本地保存路径
-                </label>
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={config.localPath}
-                    onChange={e => setConfig({ ...config, localPath: e.target.value })}
-                    className="w-full rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-mono focus:border-emerald-400 focus:outline-none focus:ring-2 focus:ring-emerald-100"
-                    placeholder="例如: D:\DownloadedLogs"
-                  />
-                  <button
-                    onClick={handleSelectFolder}
-                    disabled={selectingFolder}
-                    className="flex-shrink-0 rounded-lg bg-slate-100 px-3 py-2 text-xs font-bold text-slate-600 hover:bg-slate-200 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center min-w-[56px]"
-                  >
-                    {selectingFolder ? (
-                      <RefreshCw size={14} className="animate-spin text-slate-500" />
-                    ) : "选择"}
-                  </button>
-                </div>
+              <div className="rounded-lg border border-blue-100 bg-blue-50/60 px-3 py-2 text-[11px] leading-5 text-slate-600">
+                <Download size={11} className="inline mr-1 text-blue-500" />
+                下载的文件会直接保存到<strong> 你浏览器的默认下载文件夹</strong>，无需配置本地路径。
               </div>
 
               <div className="pt-2">
@@ -1258,7 +1149,7 @@ function ControllerManager({ store, onActivate, onAdd, onUpdate, onDelete, onClo
                 className="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm outline-none focus:border-blue-400"
               />
               <input
-                placeholder="后端 URL（http://localhost:3001 或 https://...）"
+                placeholder="后端 URL（http://localhost:3101 或 https://...）"
                 value={draft.url}
                 onChange={e => setDraft(d => ({ ...d, url: e.target.value }))}
                 onKeyDown={e => e.key === "Enter" && submit()}
@@ -1275,8 +1166,8 @@ function ControllerManager({ store, onActivate, onAdd, onUpdate, onDelete, onClo
             前端部署在 Cloudflare Pages (HTTPS) 时，<strong>无法直接访问 http:// 后端</strong>（除 localhost 外）。<br />
             两种解法：
             <ol className="ml-4 mt-1 list-decimal space-y-0.5">
-              <li>每台工控机用 <strong>Cloudflare Tunnel</strong> 暴露为 HTTPS（在工控机上 <code className="rounded bg-white/60 px-1">cloudflared tunnel --url http://localhost:3001</code>，拿到 <code className="rounded bg-white/60 px-1">https://xxx.trycloudflare.com</code>，填到 URL 字段）</li>
-              <li>用户在本机以 HTTP 启动前端（<code className="rounded bg-white/60 px-1">npx serve dist</code>），就可以填工控机的 http://10.x.x.x:3001 而不受限</li>
+              <li>每台工控机用 <strong>Cloudflare Tunnel</strong> 暴露为 HTTPS（在工控机上 <code className="rounded bg-white/60 px-1">cloudflared tunnel --url http://localhost:3101</code>，拿到 <code className="rounded bg-white/60 px-1">https://xxx.trycloudflare.com</code>，填到 URL 字段）</li>
+              <li>用户在本机以 HTTP 启动前端（<code className="rounded bg-white/60 px-1">npx serve dist</code>），就可以填工控机的 http://10.x.x.x:3101 而不受限</li>
             </ol>
           </div>
         </div>

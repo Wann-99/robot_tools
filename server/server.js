@@ -8,7 +8,7 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const PORT = 3001;
+const PORT = parseInt(process.env.PORT, 10) || 3101;
 
 // 健康检查接口
 app.get('/api/health', (req, res) => {

@@ -55,7 +55,7 @@ wrangler pages deploy dist --project-name=robot-tools
 
 ## log-fetcher 工具的说明
 
-LogFetcher（FTP/Telnet 拉日志）**需要用户本地运行 `server.js`**（在 `server/log-fetcher/`），监听 `localhost:3001`。前端直接 fetch 这个本地地址。
+LogFetcher（FTP/Telnet 拉日志）**需要用户本地或工控机运行 `server.js`**（在 `server/`），默认监听 `localhost:3101`。前端直接 fetch 这个本地地址（或 Cloudflare Tunnel 暴露的 HTTPS 地址）。
 
 请在 README 或工具内提示用户：
 ```bash
@@ -64,7 +64,7 @@ npm install
 node server.js
 ```
 
-`_headers` 文件里的 CSP 已经放行了 `connect-src http://localhost:3001`，不会被 CSP 拦截。
+`_headers` 文件里的 CSP 已经放行了 `connect-src 'self' http://localhost:* https:`（任意 localhost 端口 + 所有 HTTPS），不会被 CSP 拦截。
 
 ## 已生效的性能优化
 
@@ -90,4 +90,4 @@ node server.js
 
 - **构建报 Terser 找不到**：`npm install terser --save-dev`
 - **混淆后某些功能崩溃**：调低 `vite.config.js` 里 `controlFlowFlatteningThreshold` 或 `stringArrayThreshold`，或临时关闭 `selfDefending`
-- **LogFetcher 报 CORS / fetch failed**：用户本地的 `server.js` 没启动或不在 3001 端口
+- **LogFetcher 报 CORS / fetch failed**：用户本地的 `server.js` 没启动或不在配置的端口（默认 3101）
