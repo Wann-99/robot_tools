@@ -223,11 +223,14 @@ function parsePlanBlock(planAst, parentName) {
   });
 
   // GPIO output commands attached to a node (with their own trigger condition).
+  // raw_cond preserves the original trigger_condition AST so the global ref
+  // collector can walk it (category info isn't kept in the formatted string).
   const gpioCmds = asArray(planAst.gpio_commands).map(g => ({
     device: g.device_name || "",
     node_name: g.node_name || "",
     one_time_only: !!g.one_time_only,
     condition: formatCondition(g.trigger_condition),
+    raw_cond: g.trigger_condition,
     assignments: asArray(g.param_assignment).map(parseAssignment),
     desc: g.command_description || "",
   }));
@@ -240,6 +243,7 @@ function parsePlanBlock(planAst, parentName) {
       name: t.transit_name || "",
       condition: formatCondition(t.trigger_condition),
       refs: refsToObject(extractRefs(t.trigger_condition)),
+      raw_cond: t.trigger_condition,
       expressionSet: expr,
     };
   });
@@ -285,9 +289,17 @@ function buildModel(projAst, planAst) {
   };
   allPlans.forEach(p => {
     p.nodes.forEach(n => collect(n.raw, p, n.node_name));
-    p.transits.forEach(t => collect(t, p));
+    p.transits.forEach(t => {
+      // Walk raw trigger_condition for params with full category info,
+      // plus the parsed expressionSet (its assignments already carry category).
+      if (t.raw_cond) collect(t.raw_cond, p);
+      if (t.expressionSet) collect(t.expressionSet, p);
+    });
     p.expressions.forEach(e => collect(e, p));
-    p.gpioCmds.forEach(g => collect(g, p, g.node_name));
+    p.gpioCmds.forEach(g => {
+      if (g.raw_cond) collect(g.raw_cond, p, g.node_name);
+      collect(g, p, g.node_name);  // walks parsed assignments
+    });
   });
 
   // declared vars
